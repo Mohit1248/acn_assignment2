@@ -13,11 +13,11 @@ touching K4/A23.**
 way:
 
 - Mohit: `/client/*`, `/common/client_ops.*`, workload + experiment scripts
-  (tasks C1–C7). **C1 (client CLI) and C2 (put/get exchange) are done and
-  verified** - manually round-tripped a file through a throwaway test
-  server (byte-exact PUT then GET, error path for a missing file, HEALTH
-  reply) before committing. C3–C7 (load driver, workload files, run/analysis
-  scripts) are still open.
+  (tasks C1–C7). **C1 (client CLI), C2 (put/get exchange), and C4
+  (workload files) are done.** C2 was manually round-tripped through a
+  throwaway test server (byte-exact PUT then GET, error path for a missing
+  file, HEALTH reply) before committing. C3, C5–C7 (load driver, run/
+  analysis/comparison scripts) are still open.
 - Teammate: `/server/*` (except the scheduler core), plus the accept-loop
   side of `common/protocol.cpp` (tasks S1–S9). The generic socket
   primitives `read_header_line`/`read_exact`/`send_all` are now implemented
@@ -78,8 +78,10 @@ server/    main.cpp           CLI + wiring (S1 done; accept loop TODO S2/S3/S9)
                               satisfy A5/A6, never use it for experiments
 client/    main.cpp           CLI dispatch (C1 - Mohit, Stage 1)
            load.{h,cpp}       experiment driver (C3 - Mohit, Stage 1)
-scripts/   run/analysis/comparison scripts land here (C5/C6/C7)
-workload/  experiment workload files land here (C4)
+scripts/   gen_workload.py    generates the workload dir (C4, done)
+           run/analysis/comparison scripts still land here (C5/C6/C7)
+workload/  small.txt (~1KB), medium.txt (~30KB), large.txt (~150KB, also
+           the long-line file) - done, see Design choices below (C4)
 config.json  sample config (matches the schema below)
 ```
 
@@ -125,6 +127,19 @@ error: malformed JSON: <parser detail>
   `error: malformed JSON: <parser detail>` (nlohmann's own message, which
   includes a byte offset) rather than inventing a field name that may not
   exist for a top-level syntax error.
+- **Quantum `Q` = 8192 bytes** (8KB, within the required 2-16KB range): at
+  this Q, the ~150KB large file takes ~18 rounds under `rr` if all lines
+  were ordinary-length - well into "preempted several times" (A27).
+- **Workload (A27, C4)**: `workload/small.txt` (~1KB) and
+  `workload/medium.txt` (~30KB) contain only ordinary 60-79 byte lines.
+  `workload/large.txt` (~150KB) doubles as *both* the large-size file and
+  the required long-line file: it's built from ordinary 60-79 byte lines
+  with 6 lines of exactly 20000 bytes (> Q) spread evenly through it, so a
+  full transfer under `rr` fires the A14 escape hatch 6 times and under
+  `drr` needs `ceil(20000/8192) = 3` rounds of deficit accumulation per
+  long line (A16). Generated deterministically by
+  `scripts/gen_workload.py` (fixed seeds) so results are reproducible -
+  rerun it if the workload ever needs regenerating.
 - **`serve_slice` signature**: the plan doc's Phase 0 section writes it as
   `serve_slice(Request*, fd)`; we added `quantum_bytes` and `p_lines`
   parameters since the function can't know how much to send or whether to
