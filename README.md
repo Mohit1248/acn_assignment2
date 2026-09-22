@@ -1,8 +1,11 @@
 # COL724/7524 Assignment 2 — Link Scheduling and Load Balancing
 
 Team: Mohit + teammate. Full task split, timeline and ownership live in
-`assignment2-team-plan-v2.md` (kept out of the submission zips, kept in the
-repo for our own reference). This README covers what's actually in the repo.
+`assignment2-team-plan-v2.md` at the repo root (kept out of the submission
+zips - see the packaging note in Deliverables - but committed here so both
+of us always have the current version). This README covers what's actually
+in the repo; **see the "Known error in the plan doc" section below before
+touching K4/A23.**
 
 ## Status
 
@@ -109,6 +112,16 @@ error: malformed JSON: <parser detail>
 - **`--p` parsing**: any integer `argv` accepts via `atoi`; not clamped here
   — validating "sane" values is left to whoever wires `--p` into
   `serve_slice` (K1).
+- **Malformed-JSON message**: the spec's example error string is only given
+  for a *missing* field; for a JSON syntax error we print
+  `error: malformed JSON: <parser detail>` (nlohmann's own message, which
+  includes a byte offset) rather than inventing a field name that may not
+  exist for a top-level syntax error.
+- **`serve_slice` signature**: the plan doc's Phase 0 section writes it as
+  `serve_slice(Request*, fd)`; we added `quantum_bytes` and `p_lines`
+  parameters since the function can't know how much to send or whether to
+  batch without them. Confirm this doesn't surprise anyone at the Stage 2
+  (K1-K4) kickoff.
 - **Scheduler interface** (`server/scheduler.h`): `enqueue`/`next`/`requeue`/
   `queue_depth`/`shutdown` on `IScheduler`, plus a free `serve_slice`
   function (not a method) since it operates on a `Request*` + socket fd
@@ -120,6 +133,15 @@ error: malformed JSON: <parser detail>
   `scheduler_fcfs.cpp` is the real, spec-conforming fcfs policy and is kept
   as a working reference for how `scheduler_{sjf,rr,drr}.cpp` should be
   structured.
+
+## Known error in the plan doc (flag before Stage 2 / K4)
+
+`assignment2-team-plan-v2.md`'s S7 row says "`rounds` and `forfeited_bytes`
+= 0 for fcfs/sjf/drr and all PUTs" - this misreads the assignment. Per the
+spec (A23): **`rounds` = 1 for fcfs/sjf** (not 0), = quantum-slice count for
+rr/drr; **`forfeited_bytes`** is the one that's 0 for fcfs/sjf/drr and every
+PUT. Whoever wires K4 (CSV field population) should follow the assignment
+PDF directly for this field, not the plan doc's table.
 
 ## Git workflow
 
