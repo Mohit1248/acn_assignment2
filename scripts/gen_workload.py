@@ -7,14 +7,15 @@ Covers both axes the spec asks for in one directory:
     contains a handful of lines longer than QUANTUM, so it doubles as the
     "long-line" file required for the rr/drr split (A27, A29).
 
-QUANTUM here must match the --quantum value used for the rr/drr experiment
-runs (A28) - see README for where this is recorded.
+QUANTUM here (imported from scripts/common.py) must match the --quantum
+value used for the rr/drr experiment runs (A28) - both come from the same
+constant so they can't drift apart.
 """
 import argparse
 import os
 import random
 
-QUANTUM = 8192  # bytes; chosen in the 2-16KB range per A27
+from common import QUANTUM
 
 WORDS = ("the quick brown fox jumps over the lazy dog while packets "
          "traverse the network stack and the scheduler drains its queue "

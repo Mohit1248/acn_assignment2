@@ -11,6 +11,14 @@
 # submission zips
 *.zip
 
+# python
+__pycache__/
+*.pyc
+
+# experiment output (regenerate via scripts/run_experiments.py; commit the
+# final CSVs/logs explicitly as deliverables when ready, not implicitly)
+/results/
+
 # editor/OS cruft
 .vscode/
 .DS_Store

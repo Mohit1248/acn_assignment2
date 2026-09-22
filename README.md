@@ -13,12 +13,16 @@ touching K4/A23.**
 way:
 
 - Mohit: `/client/*`, `/common/client_ops.*`, workload + experiment scripts
-  (tasks C1–C7). **C1 (client CLI), C2 (put/get exchange), C3 (load
-  driver), and C4 (workload files) are done.** Verified against a
-  throwaway test server: byte-exact PUT/GET round trip, ERR/HEALTH
-  handling, and a 40-request/4-thread `load` run completing cleanly with
-  byte-identical seeded files. C5–C7 (run/analysis/comparison scripts) are
-  still open.
+  (tasks C1–C7). **All of C1–C7 are done.** C1-C4 verified against a
+  throwaway test server (byte-exact PUT/GET, ERR/HEALTH handling, a
+  40-request/4-thread `load` run). C5 (`run_experiments.py`) correctly
+  detects and reports that `./bin/server` isn't listening yet (expected -
+  the accept loop is still S2/S3 TODO) rather than hanging; C6
+  (`analysis.py`) and C7 (`compare_rr_drr.py`) are verified against
+  hand-computed synthetic CSVs, since their logic doesn't depend on the
+  scheduler core being finished. **None of C5-C7 have run against real
+  scheduler output yet** - that needs Stage 2 (K1-K4) plus the teammate's
+  accept loop first.
 - Teammate: `/server/*` (except the scheduler core), plus the accept-loop
   side of `common/protocol.cpp` (tasks S1–S9). The generic socket
   primitives `read_header_line`/`read_exact`/`send_all` are now implemented
@@ -79,8 +83,14 @@ server/    main.cpp           CLI + wiring (S1 done; accept loop TODO S2/S3/S9)
                               satisfy A5/A6, never use it for experiments
 client/    main.cpp           CLI dispatch (C1 - done, Mohit)
            load.{h,cpp}       experiment driver (C3 - done, Mohit)
-scripts/   gen_workload.py    generates the workload dir (C4, done)
-           run/analysis/comparison scripts still land here (C5/C6/C7)
+scripts/   common.py          shared constants/helpers (Q, N, CSV loading,
+                              percentile calc, size-class classification)
+           gen_workload.py    generates the workload dir (C4, done)
+           run_experiments.py runs the 6 required cells, collects CSVs/logs
+                              (C5, done - see Status for its current limits)
+           analysis.py        waiting p50/p99, throughput, slowdown (C6, done)
+           compare_rr_drr.py  forfeited_bytes, A14 fire count, long-line
+                              slowdown, rr vs drr (C7, done)
 workload/  small.txt (~1KB), medium.txt (~30KB), large.txt (~150KB, also
            the long-line file) - done, see Design choices below (C4)
 config.json  sample config (matches the schema below)
@@ -170,6 +180,33 @@ error: malformed JSON: <parser detail>
   `scheduler_fcfs.cpp` is the real, spec-conforming fcfs policy and is kept
   as a working reference for how `scheduler_{sjf,rr,drr}.cpp` should be
   structured.
+
+## Experiment scripts (C5/C6/C7)
+
+```
+python3 scripts/run_experiments.py                       # all 6 A28 cells
+python3 scripts/run_experiments.py --only fcfs_ref,rr_ref # a subset
+python3 scripts/analysis.py results/fcfs_ref.csv --seed-count 3 --slowdown
+python3 scripts/compare_rr_drr.py --rr-csv results/rr_ref.csv \
+    --drr-csv results/drr_ref.csv --rr-log results/rr_ref.server.log \
+    --seed-count 3
+```
+
+`--seed-count` must equal the number of files in the workload directory
+used for that run (currently 3: small/medium/large.txt) - see "Excluding
+seed requests from metrics" above for why this is sufficient.
+
+**Verification status**: `run_experiments.py`'s orchestration (config
+generation, health-check wait, client launch, graceful shutdown) is
+implemented and its failure path is confirmed working - run it today and
+it correctly reports "server never became healthy" instead of hanging,
+because `./bin/server`'s accept loop doesn't exist yet (S2/S3). Its
+`wait_for_health()` was separately confirmed to succeed against an actual
+listening HEALTH-responder. `analysis.py` and `compare_rr_drr.py` are
+verified against small hand-computed synthetic CSVs (known waiting/
+throughput/slowdown/forfeited_bytes/A14-count values, checked by hand) -
+none of the three scripts have processed real scheduler output yet, since
+that requires Stage 2 (K1-K4) to be done first.
 
 ## Known error in the plan doc (flag before Stage 2 / K4)
 
