@@ -13,11 +13,12 @@ touching K4/A23.**
 way:
 
 - Mohit: `/client/*`, `/common/client_ops.*`, workload + experiment scripts
-  (tasks C1–C7). **C1 (client CLI), C2 (put/get exchange), and C4
-  (workload files) are done.** C2 was manually round-tripped through a
-  throwaway test server (byte-exact PUT then GET, error path for a missing
-  file, HEALTH reply) before committing. C3, C5–C7 (load driver, run/
-  analysis/comparison scripts) are still open.
+  (tasks C1–C7). **C1 (client CLI), C2 (put/get exchange), C3 (load
+  driver), and C4 (workload files) are done.** Verified against a
+  throwaway test server: byte-exact PUT/GET round trip, ERR/HEALTH
+  handling, and a 40-request/4-thread `load` run completing cleanly with
+  byte-identical seeded files. C5–C7 (run/analysis/comparison scripts) are
+  still open.
 - Teammate: `/server/*` (except the scheduler core), plus the accept-loop
   side of `common/protocol.cpp` (tasks S1–S9). The generic socket
   primitives `read_header_line`/`read_exact`/`send_all` are now implemented
@@ -76,8 +77,8 @@ server/    main.cpp           CLI + wiring (S1 done; accept loop TODO S2/S3/S9)
            stub_scheduler.{h,cpp}  throwaway FIFO/whole-file path for early
                               end-to-end testing during Stage 1 - does NOT
                               satisfy A5/A6, never use it for experiments
-client/    main.cpp           CLI dispatch (C1 - Mohit, Stage 1)
-           load.{h,cpp}       experiment driver (C3 - Mohit, Stage 1)
+client/    main.cpp           CLI dispatch (C1 - done, Mohit)
+           load.{h,cpp}       experiment driver (C3 - done, Mohit)
 scripts/   gen_workload.py    generates the workload dir (C4, done)
            run/analysis/comparison scripts still land here (C5/C6/C7)
 workload/  small.txt (~1KB), medium.txt (~30KB), large.txt (~150KB, also
@@ -119,6 +120,19 @@ error: malformed JSON: <parser detail>
 - **A14 fire log**: one line to stderr per firing, format
   `A14 request_id=<id> filename=<name> line_bytes=<L> quantum=<Q>` — the
   rr-vs-drr comparison script (A29) parses this exact prefix.
+- **Excluding seed requests from metrics (A4, C3/C6)**: the spec says
+  seeding PUTs must not count in any reported metric, but the server's CSV
+  logs every completed request unconditionally (A23) - there's no "phase"
+  column. `load` seeds strictly sequentially, one PUT per workload file,
+  and only *then* spawns the concurrent load threads, so every seed
+  request's `arrival_ns`/`request_id` is guaranteed smaller than every
+  load-generated request's. The analysis script (C6) excludes seeding by
+  sorting the CSV by `arrival_ns` and dropping the first
+  `<workload file count>` rows - it does not need any other signal.
+- **`load`'s GETs discard their body** (write to `/dev/null`): `load` only
+  needs to generate timed traffic for the server to measure (A4 - "the
+  client reports nothing"); saving a file for a human is what plain
+  `client get` is for, not `load`.
 - **`--p` parsing**: any integer `argv` accepts via `atoi`; not clamped here
   — validating "sane" values is left to whoever wires `--p` into
   `serve_slice` (K1).
