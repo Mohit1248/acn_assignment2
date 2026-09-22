@@ -1,0 +1,3 @@
+Workload files land here in Stage 1 (C4, A27):
+  small (~1KB), medium (~30KB), large (~150KB); at least one file with
+  ordinary lines (60-80B) and at least one with lines longer than Q.

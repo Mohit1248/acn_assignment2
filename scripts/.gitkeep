@@ -1,0 +1,4 @@
+Run/analysis/comparison scripts land here in Stage 1 (C5, C6, C7):
+  run_experiments.sh   - drives the 6 required cells (A28)
+  analysis.py          - waiting p50/p99, throughput, slowdown (A19-A22)
+  compare_rr_drr.py    - forfeited bytes, A14 fire-count, slowdown (A29)

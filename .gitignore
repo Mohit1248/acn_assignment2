@@ -1,0 +1,16 @@
+# build artifacts
+/bin/
+*.o
+*.obj
+
+# generated at runtime - regenerate via scripts; final experiment CSVs/logs
+# are committed explicitly as deliverables, not picked up implicitly
+/metrics.csv
+/health.log
+
+# submission zips
+*.zip
+
+# editor/OS cruft
+.vscode/
+.DS_Store
