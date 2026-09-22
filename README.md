@@ -9,19 +9,26 @@ touching K4/A23.**
 
 ## Status
 
-**Phase 0 (joint contracts) complete.** The directory layout, config schema,
-wire protocol parsing, request struct, CSV schema, and scheduler interface
-are locked and committed. Stage 1 (parallel tracks) starts next:
+**Phase 0 (joint contracts) complete.** Stage 1 (parallel tracks) is under
+way:
 
 - Mohit: `/client/*`, `/common/client_ops.*`, workload + experiment scripts
-  (tasks C1–C7 in the plan doc).
-- Teammate: `/server/*` (except the scheduler core), plus the socket-I/O
-  parts of `common/protocol.cpp` (tasks S1–S9).
+  (tasks C1–C7). **C1 (client CLI) and C2 (put/get exchange) are done and
+  verified** - manually round-tripped a file through a throwaway test
+  server (byte-exact PUT then GET, error path for a missing file, HEALTH
+  reply) before committing. C3–C7 (load driver, workload files, run/analysis
+  scripts) are still open.
+- Teammate: `/server/*` (except the scheduler core), plus the accept-loop
+  side of `common/protocol.cpp` (tasks S1–S9). The generic socket
+  primitives `read_header_line`/`read_exact`/`send_all` are now implemented
+  in `protocol.cpp` (needed to get C2 working and usable by both sides) -
+  what's still open is the accept loop/thread pool itself, choosing the
+  header-read timeout value, and HEALTH/shutdown integration.
 
 Everything currently in `server/` and `client/` compiles and runs, but the
-accept loop, real socket I/O, and the sjf/rr/drr policies are `TODO` stubs —
-search the tree for `TODO(` to find every one, each tagged with which task
-(S1–S9, C1–C7, K1–K4) and spec section it corresponds to.
+accept loop and the sjf/rr/drr policies are still `TODO` stubs — search the
+tree for `TODO(` to find every one, each tagged with which task (S1–S9,
+C1–C7, K1–K4) and spec section it corresponds to.
 
 ## Build
 
@@ -51,10 +58,11 @@ Phase 0 resolution of that clash (stated per Ground Rules).
 ## Repo layout
 
 ```
-common/    protocol.{h,cpp}   wire framing + request/response parsing (locked)
+common/    protocol.{h,cpp}   wire framing + request/response parsing, incl.
+                              read_header_line/read_exact/send_all (done)
            config.{h,cpp}     config.json schema + validation (locked)
            csv_writer.{h,cpp} per-request metrics CSV (locked)
-           client_ops.{h,cpp} put/get exchange (C2 - Mohit, Stage 1)
+           client_ops.{h,cpp} put/get exchange (C2 - done, Mohit)
            request.h          the Request struct shared by scheduler + CSV
            clock.h            CLOCK_MONOTONIC timestamp helper
            logging.h          A14 fire-log line format (locked)

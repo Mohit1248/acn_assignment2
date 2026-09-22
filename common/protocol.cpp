@@ -1,8 +1,12 @@
 #include "protocol.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
+#include <sys/socket.h>
+#include <sys/types.h>
 
 // ---- pure parsing / formatting (locked in Phase 0 - no socket I/O) --------
 //
@@ -138,26 +142,93 @@ bool is_filename_safe(const std::string& name) {
 }
 
 // ---- socket I/O primitives -------------------------------------------------
-// Implementation owner: Stage 1 "server infrastructure" track (S2/S3/S9).
-// TODO(server-infra): implement with recv()/send() over POSIX sockets.
-//   - read_header_line: apply `timeout_ms` via SO_RCVTIMEO (or poll()); on a
-///    partial recv() that reads past the '\n', copy the extra bytes into
-//     `leftover` before returning - they belong to the body, not the header.
-//   - read_exact: drain `leftover` first, then recv() the remainder; loop on
-//     short reads; false on error/EOF before `n` bytes are collected.
-//   - send_all: loop send() on short writes; false only on a real error.
+// These are generic, policy-free byte-shuffling helpers - used by both sides
+// (client for put/get, C2; server once the accept loop lands, S2/S3). What's
+// still Stage 1 "server infrastructure" work (S2/S3/S9) is everything these
+// primitives don't decide: the accept loop and thread pool, which timeout
+// value to apply when parsing a freshly-accepted connection's header, and
+// how HEALTH/shutdown integrate with them.
 
-HeaderReadResult read_header_line(int /*fd*/, int /*timeout_ms*/) {
-    HeaderReadResult r;
-    r.ok = false;
-    r.error = "not implemented";
-    return r;
+namespace {
+constexpr size_t kMaxHeaderLineLen = 8192;  // guards against an unbounded read if a client never sends '\n'
+}  // namespace
+
+HeaderReadResult read_header_line(int fd, int timeout_ms) {
+    HeaderReadResult result;
+
+    if (timeout_ms >= 0) {
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
+
+    char buf[4096];
+    while (true) {
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        if (n < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                result.error = "timed out waiting for header line";
+            } else {
+                result.error = std::string("recv error: ") + std::strerror(errno);
+            }
+            return result;
+        }
+        if (n == 0) {
+            result.error = "connection closed before header line completed";
+            return result;
+        }
+
+        void* nl = memchr(buf, '\n', static_cast<size_t>(n));
+        if (nl != nullptr) {
+            size_t line_len = static_cast<char*>(nl) - buf;
+            result.line.append(buf, line_len);
+            size_t consumed = line_len + 1;  // include the '\n' itself
+            if (static_cast<size_t>(n) > consumed) {
+                result.leftover.assign(buf + consumed, buf + n);
+            }
+            result.ok = true;
+            return result;
+        }
+
+        result.line.append(buf, static_cast<size_t>(n));
+        if (result.line.size() > kMaxHeaderLineLen) {
+            result.error = "header line too long";
+            return result;
+        }
+    }
 }
 
-bool read_exact(int /*fd*/, std::vector<char>& /*leftover*/, char* /*out*/, size_t /*n*/) {
-    return false;
+bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n) {
+    size_t filled = 0;
+
+    if (!leftover.empty()) {
+        size_t take = std::min(leftover.size(), n);
+        if (take > 0) {
+            std::memcpy(out, leftover.data(), take);
+        }
+        leftover.erase(leftover.begin(), leftover.begin() + static_cast<long>(take));
+        filled = take;
+    }
+
+    while (filled < n) {
+        ssize_t r = recv(fd, out + filled, n - filled, 0);
+        if (r <= 0) return false;
+        filled += static_cast<size_t>(r);
+    }
+    return true;
 }
 
-bool send_all(int /*fd*/, const char* /*data*/, size_t /*n*/) {
-    return false;
+bool send_all(int fd, const char* data, size_t n) {
+    size_t sent = 0;
+    while (sent < n) {
+        ssize_t s = send(fd, data + sent, n - sent, 0);
+        if (s < 0) {
+            if (errno == EINTR) continue;
+            return false;
+        }
+        if (s == 0) return false;
+        sent += static_cast<size_t>(s);
+    }
+    return true;
 }
