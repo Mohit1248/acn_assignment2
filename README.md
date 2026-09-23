@@ -11,17 +11,19 @@ touching K4/A23.**
 
 **Phase 0 (joint contracts) complete.** The directory layout, config schema,
 wire protocol parsing, request struct, CSV schema, and scheduler interface
-are locked and committed. Stage 1 (parallel tracks) starts next:
+are locked and committed.
 
 - Mohit: `/client/*`, `/common/client_ops.*`, workload + experiment scripts
   (tasks C1–C7 in the plan doc).
 - Teammate: `/server/*` (except the scheduler core), plus the socket-I/O
-  parts of `common/protocol.cpp` (tasks S1–S9).
+  parts of `common/protocol.cpp` (tasks S1–S9). **Stage 1 (S1–S9) is now
+  complete and tested** — see "Stage 1 implementation notes (server-infra
+  track)" below for what was built, two real bugs found and fixed along the
+  way, and the manual test coverage.
 
-Everything currently in `server/` and `client/` compiles and runs, but the
-accept loop, real socket I/O, and the sjf/rr/drr policies are `TODO` stubs —
-search the tree for `TODO(` to find every one, each tagged with which task
-(S1–S9, C1–C7, K1–K4) and spec section it corresponds to.
+The sjf/rr/drr policies and `serve_slice` are still `TODO` stubs pending
+Stage 2 (K1–K4) — search the tree for `TODO(` to find every remaining one,
+each tagged with which task and spec section it corresponds to.
 
 ## Build
 
@@ -133,6 +135,66 @@ error: malformed JSON: <parser detail>
   `scheduler_fcfs.cpp` is the real, spec-conforming fcfs policy and is kept
   as a working reference for how `scheduler_{sjf,rr,drr}.cpp` should be
   structured.
+
+## Stage 1 implementation notes (server-infra track)
+
+`server/main.cpp` was fully rewritten this stage: accept loop, per-worker
+loop (accept → read header → validate → enqueue → `next()` → serve via the
+stub scheduler → CSV row → close), signal-driven graceful shutdown.
+
+**Threading model (design decision):** each of `server_threads` workers
+runs the *entire* pipeline itself. A worker can end up serving a connection
+it did not itself accept, because `next()` returns whatever the active
+scheduling policy's shared queue says should go next. This is intentional —
+A5 requires the shared queue to determine serving order, and a naive
+per-connection FIFO (a worker only ever serves what it accepted) does
+**not** satisfy that requirement.
+
+**Two real bugs found and fixed this stage:**
+1. `common/protocol.cpp`'s socket I/O (`read_header_line`, `read_exact`,
+   `send_all`) was left as no-op/stub code from Phase 0, even though the
+   comment attributed it to the server-infra track. Every request was
+   getting "connection reset by peer" because the server never actually
+   read the request before closing the socket. Fixed with real
+   `recv()`/`send()` loops plus `SO_RCVTIMEO` for the header-read timeout.
+2. The CSV `rounds` column always wrote `0`. A23 requires `rounds=1` for
+   fcfs/sjf. Fixed by setting `to_serve->rounds = 1;` right before serving,
+   in `worker_loop`. This is hardcoded since the stub scheduler is the only
+   one active in Stage 1 — **whoever wires K3/K4 needs to replace this with
+   real round-tracking** once rr/drr exist.
+
+**Manual test coverage (all passing):**
+- S2/S3 (accept loop, thread pool, header timeout): GET/PUT/HEALTH exercised
+  end-to-end over raw sockets.
+- S4 (filename validation, A25): `GET ../etc/passwd`, `GET ..`,
+  `GET /etc/passwd`, `GET ./../hello.txt`, `PUT ../evil.txt`,
+  `PUT /etc/foo` all correctly rejected; normal `GET` still works
+  afterward (no over-rejection).
+- S5/S6 (PUT, HEALTH): confirmed byte-opaque PUT round-trips correctly;
+  `HEALTH` answered immediately, out-of-band, never appears in the CSV.
+- S7 (CSV/timestamps): arrival/start/finish are monotonic per row across
+  both sequential and concurrent load.
+- S8 (error paths, A24): malformed request line, unknown file, non-numeric
+  and missing byte counts, missing filename, and an empty line all return
+  distinct `ERR <reason>` messages — never a silent close, never a crash.
+- S9 (graceful shutdown, A26): Ctrl+C stops accepting, drains and flushes
+  the CSV writer, joins all workers, prints
+  `requests_served=... bytes_served=...`, and exits cleanly with no
+  leftover process; `SO_REUSEADDR` allows an immediate restart.
+- Concurrency smoke test: 6 simultaneous connections against
+  `server_threads=4` all got correct, non-corrupted responses, with unique
+  sequential `request_id`s and genuinely overlapping finish times in the
+  CSV (real parallel serving, not accidental serialization).
+
+**Testing gotcha worth knowing:** when writing a raw-socket test client,
+don't call `recv()` only once and assume you have the full response — TCP
+is a byte stream, and the server's `OK <n>\n` header and the body can
+legitimately arrive in separate reads, especially under concurrent load.
+An early concurrency test looked like 4/6 responses were missing their
+body; it was a test-client bug (single `recv()` call), not a server bug.
+Read until you have the expected length instead. Also: prefer Python
+socket scripts over `nc` for manual testing — OpenBSD netcat on WSL2 had
+EOF/timing quirks that made a working server look broken.
 
 ## Known error in the plan doc (flag before Stage 2 / K4)
 
