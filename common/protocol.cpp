@@ -1,8 +1,13 @@
 #include "protocol.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 // ---- pure parsing / formatting (locked in Phase 0 - no socket I/O) --------
 //
@@ -15,7 +20,7 @@
 //     unsafe (A25). Filenames are otherwise not restricted (e.g. spaces are
 //     allowed - GET/PUT lines are still exactly 2/3 whitespace-separated
 //     tokens, so filenames containing spaces cannot be represented on the
-///    wire; this is a known, accepted limitation of the line format).
+//     wire; this is a known, accepted limitation of the line format).
 
 namespace {
 
@@ -139,25 +144,87 @@ bool is_filename_safe(const std::string& name) {
 
 // ---- socket I/O primitives -------------------------------------------------
 // Implementation owner: Stage 1 "server infrastructure" track (S2/S3/S9).
-// TODO(server-infra): implement with recv()/send() over POSIX sockets.
-//   - read_header_line: apply `timeout_ms` via SO_RCVTIMEO (or poll()); on a
-///    partial recv() that reads past the '\n', copy the extra bytes into
-//     `leftover` before returning - they belong to the body, not the header.
-//   - read_exact: drain `leftover` first, then recv() the remainder; loop on
-//     short reads; false on error/EOF before `n` bytes are collected.
-//   - send_all: loop send() on short writes; false only on a real error.
+// Done.
 
-HeaderReadResult read_header_line(int /*fd*/, int /*timeout_ms*/) {
+HeaderReadResult read_header_line(int fd, int timeout_ms) {
     HeaderReadResult r;
-    r.ok = false;
-    r.error = "not implemented";
-    return r;
+
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    std::string line;
+    char buf[512];
+    while (true) {
+        ssize_t n = recv(fd, buf, sizeof(buf), 0);
+        if (n < 0) {
+            r.ok = false;
+            r.error = (errno == EAGAIN || errno == EWOULDBLOCK)
+                          ? "header read timeout"
+                          : "recv error";
+            return r;
+        }
+        if (n == 0) {
+            r.ok = false;
+            r.error = "peer closed before header line completed";
+            return r;
+        }
+
+        // Scan this chunk for '\n'. Everything before it joins the header
+        // line; everything after it belongs to the body (leftover) - must
+        // be handed to the body reader, never discarded (framing rules).
+        char* nl = static_cast<char*>(memchr(buf, '\n', static_cast<size_t>(n)));
+        if (nl) {
+            size_t line_part = static_cast<size_t>(nl - buf);
+            line.append(buf, line_part);
+            size_t consumed = line_part + 1;  // include the '\n' itself
+            size_t remaining = static_cast<size_t>(n) - consumed;
+            if (remaining > 0) {
+                r.leftover.assign(buf + consumed, buf + consumed + remaining);
+            }
+            r.ok = true;
+            r.line = line;
+            return r;
+        }
+        line.append(buf, static_cast<size_t>(n));
+        // Guard against an unbounded header line from a hostile/broken client.
+        if (line.size() > 8192) {
+            r.ok = false;
+            r.error = "header line too long";
+            return r;
+        }
+    }
 }
 
-bool read_exact(int /*fd*/, std::vector<char>& /*leftover*/, char* /*out*/, size_t /*n*/) {
-    return false;
+bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n) {
+    size_t filled = 0;
+
+    // Drain leftover first - bytes already read off the socket during the
+    // header read but not yet consumed.
+    if (!leftover.empty()) {
+        size_t take = std::min(leftover.size(), n);
+        if (take > 0 && out != nullptr) {
+            std::memcpy(out, leftover.data(), take);
+        }
+        filled += take;
+        leftover.erase(leftover.begin(), leftover.begin() + static_cast<long>(take));
+    }
+
+    while (filled < n) {
+        ssize_t r = recv(fd, out + filled, n - filled, 0);
+        if (r <= 0) return false;  // error or peer closed early
+        filled += static_cast<size_t>(r);
+    }
+    return true;
 }
 
-bool send_all(int /*fd*/, const char* /*data*/, size_t /*n*/) {
-    return false;
+bool send_all(int fd, const char* data, size_t n) {
+    size_t sent = 0;
+    while (sent < n) {
+        ssize_t s = send(fd, data + sent, n - sent, 0);
+        if (s <= 0) return false;  // real send error
+        sent += static_cast<size_t>(s);
+    }
+    return true;
 }
