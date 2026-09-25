@@ -149,10 +149,12 @@ bool is_filename_safe(const std::string& name) {
 HeaderReadResult read_header_line(int fd, int timeout_ms) {
     HeaderReadResult r;
 
-    struct timeval tv;
-    tv.tv_sec = timeout_ms / 1000;
-    tv.tv_usec = (timeout_ms % 1000) * 1000;
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    if (timeout_ms >= 0) {  // negative = leave the socket's existing timeout alone
+        struct timeval tv;
+        tv.tv_sec = timeout_ms / 1000;
+        tv.tv_usec = (timeout_ms % 1000) * 1000;
+        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    }
 
     std::string line;
     char buf[512];
@@ -223,7 +225,8 @@ bool send_all(int fd, const char* data, size_t n) {
     size_t sent = 0;
     while (sent < n) {
         ssize_t s = send(fd, data + sent, n - sent, MSG_NOSIGNAL);
-        if (s <= 0) return false;  // real send error
+        if (s < 0 && errno == EINTR) continue;  // interrupted by a signal, retry
+        if (s <= 0) return false;                // real send error
         sent += static_cast<size_t>(s);
     }
     return true;

@@ -9,20 +9,18 @@ touching K4/A23.**
 
 ## Status
 
-**Phase 0 (joint contracts) complete.** The directory layout, config schema,
-wire protocol parsing, request struct, CSV schema, and scheduler interface
-are locked and committed.
+**Phase 0 (joint contracts) complete. Stage 1 (parallel tracks) is complete
+and merged into `main`.** Stage 2 (the scheduler core, K1-K4) is next.
 
 - Mohit: `/client/*`, `/common/client_ops.*`, workload + experiment scripts
-  (tasks C1–C7 in the plan doc).
-- Teammate: `/server/*` (except the scheduler core), plus the socket-I/O
-  parts of `common/protocol.cpp` (tasks S1–S9). **Stage 1 (S1–S9) is now
-  complete and tested** — see "Stage 1 implementation notes (server-infra
-  track)" below for what was built, two real bugs found and fixed along the
-  way, and the manual test coverage.
+  (C1-C7): all done. See "Experiment scripts" below for what each script does
+  and how it was verified.
+- Teammate: `/server/*` (except the scheduler core) plus the socket
+  primitives in `common/protocol.cpp` (S1-S9): done and tested - see "Stage 1
+  implementation notes (server-infra track)" below.
 
 The sjf/rr/drr policies and `serve_slice` are still `TODO` stubs pending
-Stage 2 (K1–K4) — search the tree for `TODO(` to find every remaining one,
+Stage 2 (K1-K4) - search the tree for `TODO(` to find every remaining one,
 each tagged with which task and spec section it corresponds to.
 
 ## Build
@@ -53,10 +51,11 @@ Phase 0 resolution of that clash (stated per Ground Rules).
 ## Repo layout
 
 ```
-common/    protocol.{h,cpp}   wire framing + request/response parsing (locked)
+common/    protocol.{h,cpp}   wire framing + request/response parsing, incl.
+                              read_header_line/read_exact/send_all (done)
            config.{h,cpp}     config.json schema + validation (locked)
            csv_writer.{h,cpp} per-request metrics CSV (locked)
-           client_ops.{h,cpp} put/get exchange (C2 - Mohit, Stage 1)
+           client_ops.{h,cpp} put/get exchange (C2 - done, Mohit)
            request.h          the Request struct shared by scheduler + CSV
            clock.h            CLOCK_MONOTONIC timestamp helper
            logging.h          A14 fire-log line format (locked)
@@ -70,10 +69,18 @@ server/    main.cpp           CLI + wiring (S1 done; accept loop TODO S2/S3/S9)
            stub_scheduler.{h,cpp}  throwaway FIFO/whole-file path for early
                               end-to-end testing during Stage 1 - does NOT
                               satisfy A5/A6, never use it for experiments
-client/    main.cpp           CLI dispatch (C1 - Mohit, Stage 1)
-           load.{h,cpp}       experiment driver (C3 - Mohit, Stage 1)
-scripts/   run/analysis/comparison scripts land here (C5/C6/C7)
-workload/  experiment workload files land here (C4)
+client/    main.cpp           CLI dispatch (C1 - done, Mohit)
+           load.{h,cpp}       experiment driver (C3 - done, Mohit)
+scripts/   common.py          shared constants/helpers (Q, N, CSV loading,
+                              percentile calc, size-class classification)
+           gen_workload.py    generates the workload dir (C4, done)
+           run_experiments.py runs the 6 required cells, collects CSVs/logs
+                              (C5, done - see Status for its current limits)
+           analysis.py        waiting p50/p99, throughput, slowdown (C6, done)
+           compare_rr_drr.py  forfeited_bytes, A14 fire count, long-line
+                              slowdown, rr vs drr (C7, done)
+workload/  small.txt (~1KB), medium.txt (~30KB), large.txt (~150KB, also
+           the long-line file) - done, see Design choices below (C4)
 config.json  sample config (matches the schema below)
 ```
 
@@ -111,6 +118,19 @@ error: malformed JSON: <parser detail>
 - **A14 fire log**: one line to stderr per firing, format
   `A14 request_id=<id> filename=<name> line_bytes=<L> quantum=<Q>` — the
   rr-vs-drr comparison script (A29) parses this exact prefix.
+- **Excluding seed requests from metrics (A4, C3/C6)**: the spec says
+  seeding PUTs must not count in any reported metric, but the server's CSV
+  logs every completed request unconditionally (A23) - there's no "phase"
+  column. `load` seeds strictly sequentially, one PUT per workload file,
+  and only *then* spawns the concurrent load threads, so every seed
+  request's `arrival_ns`/`request_id` is guaranteed smaller than every
+  load-generated request's. The analysis script (C6) excludes seeding by
+  sorting the CSV by `arrival_ns` and dropping the first
+  `<workload file count>` rows - it does not need any other signal.
+- **`load`'s GETs discard their body** (write to `/dev/null`): `load` only
+  needs to generate timed traffic for the server to measure (A4 - "the
+  client reports nothing"); saving a file for a human is what plain
+  `client get` is for, not `load`.
 - **`--p` parsing**: any integer `argv` accepts via `atoi`; not clamped here
   — validating "sane" values is left to whoever wires `--p` into
   `serve_slice` (K1).
@@ -119,6 +139,19 @@ error: malformed JSON: <parser detail>
   `error: malformed JSON: <parser detail>` (nlohmann's own message, which
   includes a byte offset) rather than inventing a field name that may not
   exist for a top-level syntax error.
+- **Quantum `Q` = 8192 bytes** (8KB, within the required 2-16KB range): at
+  this Q, the ~150KB large file takes ~18 rounds under `rr` if all lines
+  were ordinary-length - well into "preempted several times" (A27).
+- **Workload (A27, C4)**: `workload/small.txt` (~1KB) and
+  `workload/medium.txt` (~30KB) contain only ordinary 60-79 byte lines.
+  `workload/large.txt` (~150KB) doubles as *both* the large-size file and
+  the required long-line file: it's built from ordinary 60-79 byte lines
+  with 6 lines of exactly 20000 bytes (> Q) spread evenly through it, so a
+  full transfer under `rr` fires the A14 escape hatch 6 times and under
+  `drr` needs `ceil(20000/8192) = 3` rounds of deficit accumulation per
+  long line (A16). Generated deterministically by
+  `scripts/gen_workload.py` (fixed seeds) so results are reproducible -
+  rerun it if the workload ever needs regenerating.
 - **`serve_slice` signature**: the plan doc's Phase 0 section writes it as
   `serve_slice(Request*, fd)`; we added `quantum_bytes` and `p_lines`
   parameters since the function can't know how much to send or whether to
@@ -138,30 +171,47 @@ error: malformed JSON: <parser detail>
 
 ## Stage 1 implementation notes (server-infra track)
 
-`server/main.cpp` was fully rewritten this stage: accept loop, per-worker
-loop (accept → read header → validate → enqueue → `next()` → serve via the
-stub scheduler → CSV row → close), signal-driven graceful shutdown.
+`server/main.cpp` implements the accept loop, worker pool, and signal-driven
+graceful shutdown.
 
-**Threading model (design decision):** each of `server_threads` workers
-runs the *entire* pipeline itself. A worker can end up serving a connection
-it did not itself accept, because `next()` returns whatever the active
-scheduling policy's shared queue says should go next. This is intentional —
-A5 requires the shared queue to determine serving order, and a naive
-per-connection FIFO (a worker only ever serves what it accepted) does
-**not** satisfy that requirement.
+**Threading model (design decision, A5):** three roles, so admission is fully
+decoupled from serving:
+- one **acceptor** thread that only ever calls `accept()`;
+- one short-lived **admission** thread per accepted connection: reads the
+  header (with a receive timeout, S3), parses/validates it, answers `HEALTH`
+  immediately (S6), and otherwise `enqueue()`s the request;
+- `server_threads` **worker** threads that only loop on `next()` -> serve ->
+  CSV row -> close, never touching `accept()` or header parsing.
 
-**Two real bugs found and fixed this stage:**
-1. `common/protocol.cpp`'s socket I/O (`read_header_line`, `read_exact`,
-   `send_all`) was left as no-op/stub code from Phase 0, even though the
-   comment attributed it to the server-infra track. Every request was
-   getting "connection reset by peer" because the server never actually
-   read the request before closing the socket. Fixed with real
+This is what makes the scheduler queue real: requests pile up in it while all
+workers are busy, so the active policy (not TCP accept order) decides who is
+served next. An earlier version had each worker do accept -> parse -> enqueue
+-> `next()` -> serve in one loop; that let the queue hold at most
+`server_threads` requests, so sjf/rr/drr could never reorder anything (A5),
+and a silent client made `HEALTH` wait behind the header timeout.
+
+**Shutdown order (A26):** stop accepting (`shutdown()` on the listening
+socket), join the acceptor, wait for every in-flight admission thread to
+finish, only then `sched->shutdown()`, join the workers, and free the
+scheduler. Requests accepted just before the signal are therefore still
+enqueued, drained and answered.
+
+**Robustness choices made after integration testing:**
+- `send_all` uses `MSG_NOSIGNAL` (and `SIGPIPE` is ignored): a client hanging
+  up mid-response must never kill the server.
+- A PUT declaring more than `kMaxPutBytes` (1 GiB) is rejected at admission
+  with `ERR`, and any exception raised while serving one request is caught,
+  answered with `ERR`, and does not take down the worker or the server.
+
+**Bugs found and fixed during Stage 1:**
+1. `common/protocol.cpp`'s socket I/O was left as no-op stub code from Phase 0,
+   so every request got "connection reset by peer". Fixed with real
    `recv()`/`send()` loops plus `SO_RCVTIMEO` for the header-read timeout.
 2. The CSV `rounds` column always wrote `0`. A23 requires `rounds=1` for
-   fcfs/sjf. Fixed by setting `to_serve->rounds = 1;` right before serving,
-   in `worker_loop`. This is hardcoded since the stub scheduler is the only
-   one active in Stage 1 — **whoever wires K3/K4 needs to replace this with
-   real round-tracking** once rr/drr exist.
+   fcfs/sjf. Fixed by setting `to_serve->rounds = 1;` before serving. This is
+   hardcoded since the stub scheduler is the only one active in Stage 1 -
+   **whoever wires K3/K4 needs to replace it with real round-tracking** once
+   rr/drr exist.
 
 **Manual test coverage (all passing):**
 - S2/S3 (accept loop, thread pool, header timeout): GET/PUT/HEALTH exercised
@@ -170,31 +220,50 @@ per-connection FIFO (a worker only ever serves what it accepted) does
   `GET /etc/passwd`, `GET ./../hello.txt`, `PUT ../evil.txt`,
   `PUT /etc/foo` all correctly rejected; normal `GET` still works
   afterward (no over-rejection).
-- S5/S6 (PUT, HEALTH): confirmed byte-opaque PUT round-trips correctly;
-  `HEALTH` answered immediately, out-of-band, never appears in the CSV.
+- S5/S6 (PUT, HEALTH): byte-opaque PUT round-trips correctly; `HEALTH`
+  answered immediately, out-of-band, never appears in the CSV.
 - S7 (CSV/timestamps): arrival/start/finish are monotonic per row across
   both sequential and concurrent load.
 - S8 (error paths, A24): malformed request line, unknown file, non-numeric
   and missing byte counts, missing filename, and an empty line all return
-  distinct `ERR <reason>` messages — never a silent close, never a crash.
+  distinct `ERR <reason>` messages - never a silent close, never a crash.
 - S9 (graceful shutdown, A26): Ctrl+C stops accepting, drains and flushes
   the CSV writer, joins all workers, prints
-  `requests_served=... bytes_served=...`, and exits cleanly with no
-  leftover process; `SO_REUSEADDR` allows an immediate restart.
-- Concurrency smoke test: 6 simultaneous connections against
-  `server_threads=4` all got correct, non-corrupted responses, with unique
-  sequential `request_id`s and genuinely overlapping finish times in the
-  CSV (real parallel serving, not accidental serialization).
+  `requests_served=... bytes_served=...`, and exits cleanly; `SO_REUSEADDR`
+  allows an immediate restart.
+- Concurrency smoke test: simultaneous connections against
+  `server_threads=4` all got correct, non-corrupted responses with unique
+  sequential `request_id`s and genuinely overlapping finish times.
+- Integration tests (run after merging both tracks, see `tests/`): silent
+  client vs `HEALTH` (answers in ~1 ms), 400 mid-transfer hang-ups (server
+  survives), queue depth building up behind a pinned worker, a request
+  accepted just before SIGTERM still being answered, a gigantic declared PUT
+  size (rejected with `ERR`), and a 200-request 8-client-thread `load` run
+  producing exactly 203 CSV rows (3 seed + 200).
 
 **Testing gotcha worth knowing:** when writing a raw-socket test client,
-don't call `recv()` only once and assume you have the full response — TCP
+don't call `recv()` only once and assume you have the full response - TCP
 is a byte stream, and the server's `OK <n>\n` header and the body can
-legitimately arrive in separate reads, especially under concurrent load.
-An early concurrency test looked like 4/6 responses were missing their
-body; it was a test-client bug (single `recv()` call), not a server bug.
-Read until you have the expected length instead. Also: prefer Python
-socket scripts over `nc` for manual testing — OpenBSD netcat on WSL2 had
-EOF/timing quirks that made a working server look broken.
+legitimately arrive in separate reads. Read until you have the expected
+length instead. Also: prefer Python socket scripts over `nc` for manual
+testing - OpenBSD netcat on WSL2 had EOF/timing quirks.
+
+## Experiment scripts (C5/C6/C7)
+
+```
+python3 scripts/run_experiments.py                       # all 6 A28 cells
+python3 scripts/run_experiments.py --only fcfs_ref,rr_ref # a subset
+python3 scripts/analysis.py results/fcfs_ref.csv --seed-count 3 --slowdown
+python3 scripts/compare_rr_drr.py --rr-csv results/rr_ref.csv \
+    --drr-csv results/drr_ref.csv --rr-log results/rr_ref.server.log \
+    --seed-count 3
+```
+
+`--seed-count` must equal the number of files in the workload directory
+used for that run (currently 3: small/medium/large.txt) - see "Excluding
+seed requests from metrics" above for why this is sufficient.
+
+**Verification status**: @@VERIFICATION@@
 
 ## Known error in the plan doc (flag before Stage 2 / K4)
 
