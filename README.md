@@ -39,7 +39,7 @@ top-level layout already uses the names `server/` and `client/` for source
 directories — a file and a directory can't share a name, so this is our
 Phase 0 resolution of that clash (stated per Ground Rules).
 
-## Run (once Stage 1/2 land — today this just parses args and exits)
+## Run (server serves with the stub scheduler until Stage 2 lands)
 
 ```
 ./bin/server --sched fcfs --file ./workload --config config.json --metrics-out metrics.csv
@@ -60,7 +60,7 @@ common/    protocol.{h,cpp}   wire framing + request/response parsing, incl.
            clock.h            CLOCK_MONOTONIC timestamp helper
            logging.h          A14 fire-log line format (locked)
            third_party/       vendored nlohmann/json.hpp (v3.11.3)
-server/    main.cpp           CLI + wiring (S1 done; accept loop TODO S2/S3/S9)
+server/    main.cpp           CLI, acceptor/admission/worker threads, shutdown (S1-S9, done)
            scheduler.h        IScheduler interface + serve_slice contract (locked)
            queue.h            shared thread-safe request queue helper (locked)
            scheduler_fcfs.cpp real fcfs implementation (reference for the others)
@@ -81,7 +81,13 @@ scripts/   common.py          shared constants/helpers (Q, N, CSV loading,
                               slowdown, rr vs drr (C7, done)
 workload/  small.txt (~1KB), medium.txt (~30KB), large.txt (~150KB, also
            the long-line file) - done, see Design choices below (C4)
-config.json  sample config (matches the schema below)
+tests/     integration_test.sh  regression suite for the merged server+client
+                              (run `make` then `tests/integration_test.sh`)
+           test_*.py          the server-infra track's manual raw-socket tests
+                              (default port 9000, start a server first)
+           data/              small inputs used by those manual tests
+config.json  sample config = the A28 reference config (4 server threads,
+           8 client threads); experiment scripts override per run
 ```
 
 ## config.json fields
@@ -263,7 +269,17 @@ python3 scripts/compare_rr_drr.py --rr-csv results/rr_ref.csv \
 used for that run (currently 3: small/medium/large.txt) - see "Excluding
 seed requests from metrics" above for why this is sufficient.
 
-**Verification status**: @@VERIFICATION@@
+**Verification status**: all three scripts have now been run against the real server
+(stub scheduler, since sjf/rr/drr do not exist yet): `run_experiments.py`
+started the server, waited for `HEALTH`, ran `load`, shut down gracefully and
+collected the CSV for both an fcfs and an rr cell; `analysis.py` correctly
+reported N=200 from a 203-row CSV (i.e. the 3 seed rows were excluded) and
+plausible per-size-class slowdowns. `analysis.py` and `compare_rr_drr.py` were
+also checked against small hand-computed synthetic CSVs (waiting/throughput/
+slowdown/forfeited_bytes/A14-count values verified by hand).
+**None of the numbers produced so far are report material**: the stub
+scheduler is FIFO/whole-file, so every policy behaves like fcfs until Stage 2
+(K1-K4) replaces it. `compare_rr_drr.py` has not seen a real rr/drr pair yet.
 
 ## Known error in the plan doc (flag before Stage 2 / K4)
 
