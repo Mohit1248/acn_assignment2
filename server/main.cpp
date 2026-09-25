@@ -11,6 +11,7 @@
 #include <cstring>
 #include <iostream>
 #include <string>
+#include <system_error>
 #include <thread>
 #include <vector>
 
@@ -30,6 +31,11 @@ namespace {
 // TODO(S3): confirm this against the assignment PDF - not a config.json
 // field, so it's a local constant for now.
 constexpr int kHeaderTimeoutMs = 5000;
+
+// Largest PUT body we accept. The spec sets no limit; without one, a request
+// like "PUT x 99999999999999" makes the transfer path try to allocate that
+// much memory and abort the whole server. Rejected with ERR at admission.
+constexpr uint64_t kMaxPutBytes = 1ULL << 30;  // 1 GiB
 
 struct Args {
     std::string sched;
@@ -108,6 +114,15 @@ std::atomic<uint64_t> g_next_id{1};
 std::atomic<uint64_t> g_requests_served{0};
 std::atomic<uint64_t> g_bytes_served{0};
 
+// Admission threads are detached, so shutdown has to be able to wait for
+// them: a request accepted just before SIGTERM must still be enqueued and
+// answered (A26), and the scheduler/args must outlive every such thread.
+std::atomic<int> g_active_admissions{0};
+
+struct AdmissionGuard {
+    ~AdmissionGuard() { g_active_admissions.fetch_sub(1); }
+};
+
 int make_listening_socket(const std::string& ip, uint16_t port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
@@ -148,6 +163,8 @@ void send_err_and_close(int fd, const std::string& reason) {
 // a silent/slow client only ties up its own short-lived thread - never a
 // server worker, and never blocks HEALTH behind it.
 void admit_connection(int fd, IScheduler* sched, const Args& args) {
+    AdmissionGuard guard;  // counted in g_active_admissions by the acceptor
+
     // S3: bounded header read so a silent client can't pin a worker.
     HeaderReadResult hdr = read_header_line(fd, kHeaderTimeoutMs);
     if (!hdr.ok) {
@@ -174,6 +191,10 @@ void admit_connection(int fd, IScheduler* sched, const Args& args) {
     // S4: filename sandboxing before any file I/O.
     if (!is_filename_safe(parsed.filename)) {
         send_err_and_close(fd, "unsafe filename");
+        return;
+    }
+    if (parsed.type == ReqType::PUT && parsed.byte_count > kMaxPutBytes) {
+        send_err_and_close(fd, "declared size too large");  // A24
         return;
     }
     std::string full_path = args.file_dir + "/" + parsed.filename;
@@ -214,7 +235,15 @@ void acceptor_loop(int listen_fd, IScheduler* sched, const Args& args) {
             if (g_shutdown.load()) return;  // listen_fd closed for shutdown (S9)
             continue;                        // transient accept error - retry
         }
-        std::thread(admit_connection, fd, sched, std::cref(args)).detach();
+        g_active_admissions.fetch_add(1);  // before the thread starts, so shutdown can't miss it
+        try {
+            std::thread(admit_connection, fd, sched, std::cref(args)).detach();
+        } catch (const std::system_error&) {
+            // Out of threads: shed this connection with an ERR rather than
+            // letting the exception abort the whole server.
+            g_active_admissions.fetch_sub(1);
+            send_err_and_close(fd, "server busy");
+        }
     }
 }
 
@@ -230,7 +259,15 @@ void server_worker_loop(IScheduler* sched, CsvWriter& csv, const Args& args) {
         to_serve->rounds = 1;  // A23 (Stage-1 stub only, see TODO in Stage 2)
 
         std::string served_path = args.file_dir + "/" + to_serve->filename;
-        bool ok = stub_serve_whole(to_serve, to_serve->client_fd, served_path);
+        bool ok = false;
+        try {
+            ok = stub_serve_whole(to_serve, to_serve->client_fd, served_path);
+        } catch (const std::exception&) {
+            // One bad request (e.g. bad_alloc) must not take down the worker
+            // or the server; tell the client instead of closing silently (A24).
+            send_all(to_serve->client_fd, format_err("internal error").data(),
+                     format_err("internal error").size());
+        }
         to_serve->finish_ns = now_monotonic_ns();
 
         if (ok) {
@@ -238,7 +275,8 @@ void server_worker_loop(IScheduler* sched, CsvWriter& csv, const Args& args) {
             g_requests_served.fetch_add(1);
             g_bytes_served.fetch_add(to_serve->bytes);
         }
-        // stub_serve_whole already sent ERR on failure (A24) - nothing more to do.
+        // On failure stub_serve_whole has already replied ERR where it can
+        // (missing file, unwritable destination); a dead connection needs no reply.
 
         close(to_serve->client_fd);
         delete to_serve;
@@ -274,22 +312,29 @@ int main(int argc, char** argv) {
 
     std::thread acceptor(acceptor_loop, listen_fd, sched, std::cref(args));
 
-std::vector<std::thread> workers;
-workers.reserve(static_cast<size_t>(cfg.server.server_threads));
-for (int i = 0; i < cfg.server.server_threads; ++i) {
-    workers.emplace_back(server_worker_loop, sched, std::ref(csv), std::cref(args));
-}
+    std::vector<std::thread> workers;
+    workers.reserve(static_cast<size_t>(cfg.server.server_threads));
+    for (int i = 0; i < cfg.server.server_threads; ++i) {
+        workers.emplace_back(server_worker_loop, sched, std::ref(csv), std::cref(args));
+    }
 
     while (!g_shutdown.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    // S9: graceful shutdown - stop accepting, drain the queue, join workers.
+    // S9/A26: graceful shutdown. Order matters:
+    //   1. stop accepting (wakes the acceptor out of accept()) and join it;
+    //   2. wait for every in-flight admission thread, so a request accepted
+    //      just before the signal is still enqueued rather than dropped;
+    //   3. only then tell the scheduler to drain, and join the workers.
     shutdown(listen_fd, SHUT_RDWR);
-close(listen_fd);
-sched->shutdown();
-acceptor.join();
-for (auto& t : workers) t.join();
+    acceptor.join();
+    close(listen_fd);
+    while (g_active_admissions.load() > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    sched->shutdown();
+    for (auto& t : workers) t.join();
 
     std::cerr << "server: shutting down. requests_served=" << g_requests_served.load()
               << " bytes_served=" << g_bytes_served.load() << "\n";

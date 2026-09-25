@@ -67,7 +67,11 @@ bool stub_serve_whole(Request* req, int fd, const std::string& full_path) {
     }
 
     std::ofstream out(full_path, std::ios::binary | std::ios::trunc);
-    if (!out) return false;
+    if (!out) {
+        std::string err = format_err("cannot write file");  // A24: never a silent close
+        send_all(fd, err.data(), err.size());
+        return false;
+    }
     if (req->bytes > 0) out.write(buf.data(), static_cast<std::streamsize>(req->bytes));
     req->byte_offset = req->bytes;
 
