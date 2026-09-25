@@ -144,9 +144,68 @@ void send_err_and_close(int fd, const std::string& reason) {
     close(fd);
 }
 
-// One worker's full loop: admit a connection, enqueue it, then serve
-// whichever request the scheduler hands back next (S2/S3/S4/S6/S7/S8).
-void worker_loop(int listen_fd, IScheduler* sched, CsvWriter& csv, const Args& args) {
+// Runs once per accepted connection, then exits. Decoupled from serving, so
+// a silent/slow client only ties up its own short-lived thread - never a
+// server worker, and never blocks HEALTH behind it.
+void admit_connection(int fd, IScheduler* sched, const Args& args) {
+    // S3: bounded header read so a silent client can't pin a worker.
+    HeaderReadResult hdr = read_header_line(fd, kHeaderTimeoutMs);
+    if (!hdr.ok) {
+        send_err_and_close(fd, hdr.error.empty() ? "header read timeout" : hdr.error);
+        return;
+    }
+
+    ParsedRequestLine parsed = parse_request_line(hdr.line);
+    if (parsed.type == ReqType::MALFORMED) {
+        send_err_and_close(fd, parsed.error);  // S8/A24
+        return;
+    }
+
+    if (parsed.type == ReqType::HEALTH) {
+        // S6: immediate, out-of-band, never enqueued, never in the CSV.
+        // Now genuinely immediate - no longer stuck behind a worker or a
+        // stuck peer, since admission is decoupled from serving.
+        std::string resp = format_ok(sched->queue_depth());
+        send_all(fd, resp.data(), resp.size());
+        close(fd);
+        return;
+    }
+
+    // S4: filename sandboxing before any file I/O.
+    if (!is_filename_safe(parsed.filename)) {
+        send_err_and_close(fd, "unsafe filename");
+        return;
+    }
+    std::string full_path = args.file_dir + "/" + parsed.filename;
+
+    auto* req = new Request();
+    req->id = g_next_id.fetch_add(1);
+    req->client_fd = fd;
+    req->filename = parsed.filename;
+    req->leftover = std::move(hdr.leftover);
+    req->arrival_ns = now_monotonic_ns();
+
+    if (parsed.type == ReqType::GET) {
+        req->op = Request::Op::GET;
+        struct stat st{};
+        if (::stat(full_path.c_str(), &st) != 0) {
+            send_err_and_close(fd, "file not found");
+            delete req;
+            return;
+        }
+        req->bytes = static_cast<uint64_t>(st.st_size);  // declared size, per request.h
+    } else {
+        req->op = Request::Op::PUT;
+        req->bytes = parsed.byte_count;
+    }
+
+    sched->enqueue(req);  // admitted (A5) - queue can now genuinely build up
+}
+
+// Single thread: only ever calls accept(). Spins off a detached admission
+// thread per connection so no client - however slow or silent - can block
+// the ability to accept the *next* connection.
+void acceptor_loop(int listen_fd, IScheduler* sched, const Args& args) {
     while (true) {
         sockaddr_in client_addr{};
         socklen_t addrlen = sizeof(client_addr);
@@ -155,65 +214,21 @@ void worker_loop(int listen_fd, IScheduler* sched, CsvWriter& csv, const Args& a
             if (g_shutdown.load()) return;  // listen_fd closed for shutdown (S9)
             continue;                        // transient accept error - retry
         }
+        std::thread(admit_connection, fd, sched, std::cref(args)).detach();
+    }
+}
 
-        // S3: bounded header read so a silent client can't pin this worker.
-        HeaderReadResult hdr = read_header_line(fd, kHeaderTimeoutMs);
-        if (!hdr.ok) {
-            send_err_and_close(fd, hdr.error.empty() ? "header read timeout" : hdr.error);
-            continue;
-        }
+// server_threads workers, each purely a consumer of the shared queue - never
+// touches accept() or header parsing. This is what actually satisfies A5:
+// serving order is decided by whichever policy is active, not by who
+// happened to accept a connection.
+void server_worker_loop(IScheduler* sched, CsvWriter& csv, const Args& args) {
+    while (true) {
+        Request* to_serve = sched->next();  // blocks until available or shutdown
+        if (!to_serve) return;              // shutdown drained the queue
 
-        ParsedRequestLine parsed = parse_request_line(hdr.line);
-        if (parsed.type == ReqType::MALFORMED) {
-            send_err_and_close(fd, parsed.error);  // S8/A24
-            continue;
-        }
+        to_serve->rounds = 1;  // A23 (Stage-1 stub only, see TODO in Stage 2)
 
-        if (parsed.type == ReqType::HEALTH) {
-            // S6: immediate, out-of-band, never enqueued, never in the CSV.
-            std::string resp = format_ok(sched->queue_depth());
-            send_all(fd, resp.data(), resp.size());
-            close(fd);
-            continue;
-        }
-
-        // S4: filename sandboxing before any file I/O.
-        if (!is_filename_safe(parsed.filename)) {
-            send_err_and_close(fd, "unsafe filename");
-            continue;
-        }
-        std::string full_path = args.file_dir + "/" + parsed.filename;
-
-        auto* req = new Request();
-        req->id = g_next_id.fetch_add(1);
-        req->client_fd = fd;
-        req->filename = parsed.filename;
-        req->leftover = std::move(hdr.leftover);
-        req->arrival_ns = now_monotonic_ns();
-
-        if (parsed.type == ReqType::GET) {
-            req->op = Request::Op::GET;
-            struct stat st{};
-            if (::stat(full_path.c_str(), &st) != 0) {
-                send_err_and_close(fd, "file not found");
-                delete req;
-                continue;
-            }
-            req->bytes = static_cast<uint64_t>(st.st_size);  // declared size, per request.h
-        } else {
-            req->op = Request::Op::PUT;
-            req->bytes = parsed.byte_count;
-        }
-
-        sched->enqueue(req);  // admitted (A5)
-
-        // Pull the next unit of work per the active policy's order - may be
-        // a different connection's request than the one just admitted.
-        Request* to_serve = sched->next();
-        if (!to_serve) return;  // shutdown drained the queue
-
-        to_serve->rounds = 1;  // A23: fcfs/sjf serve whole-file in one round (Stage 1, stub-only for now)
-        
         std::string served_path = args.file_dir + "/" + to_serve->filename;
         bool ok = stub_serve_whole(to_serve, to_serve->client_fd, served_path);
         to_serve->finish_ns = now_monotonic_ns();
@@ -244,6 +259,7 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
+    std::signal(SIGPIPE, SIG_IGN);
 
     int listen_fd = make_listening_socket(cfg.server.ip, cfg.server.port);
 
@@ -256,11 +272,13 @@ int main(int argc, char** argv) {
               << "). Listening on " << cfg.server.ip << ":" << cfg.server.port
               << " with " << cfg.server.server_threads << " worker thread(s).\n";
 
-    std::vector<std::thread> workers;
-    workers.reserve(static_cast<size_t>(cfg.server.server_threads));
-    for (int i = 0; i < cfg.server.server_threads; ++i) {
-        workers.emplace_back(worker_loop, listen_fd, sched, std::ref(csv), std::cref(args));
-    }
+    std::thread acceptor(acceptor_loop, listen_fd, sched, std::cref(args));
+
+std::vector<std::thread> workers;
+workers.reserve(static_cast<size_t>(cfg.server.server_threads));
+for (int i = 0; i < cfg.server.server_threads; ++i) {
+    workers.emplace_back(server_worker_loop, sched, std::ref(csv), std::cref(args));
+}
 
     while (!g_shutdown.load()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -268,9 +286,10 @@ int main(int argc, char** argv) {
 
     // S9: graceful shutdown - stop accepting, drain the queue, join workers.
     shutdown(listen_fd, SHUT_RDWR);
-    close(listen_fd);
-    sched->shutdown();
-    for (auto& t : workers) t.join();
+close(listen_fd);
+sched->shutdown();
+acceptor.join();
+for (auto& t : workers) t.join();
 
     std::cerr << "server: shutting down. requests_served=" << g_requests_served.load()
               << " bytes_served=" << g_bytes_served.load() << "\n";

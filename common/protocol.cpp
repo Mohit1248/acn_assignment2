@@ -222,7 +222,7 @@ bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n) {
 bool send_all(int fd, const char* data, size_t n) {
     size_t sent = 0;
     while (sent < n) {
-        ssize_t s = send(fd, data + sent, n - sent, 0);
+        ssize_t s = send(fd, data + sent, n - sent, MSG_NOSIGNAL);
         if (s <= 0) return false;  // real send error
         sent += static_cast<size_t>(s);
     }
