@@ -4,7 +4,7 @@
 # Exits non-zero if any check fails.
 set -u
 R="$(cd "$(dirname "$0")/.." && pwd)"
-BIN="$R/bin"
+BIN="$R"
 W="$(mktemp -d)"
 FAILS=0
 SP=""

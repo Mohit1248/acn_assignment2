@@ -2,34 +2,33 @@ CXX := g++
 CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -pthread
 LDFLAGS := -pthread
 
-COMMON_SRC_SERVER := common/protocol.cpp common/config.cpp common/csv_writer.cpp
-COMMON_SRC_CLIENT := common/protocol.cpp common/config.cpp common/client_ops.cpp
+COMMON_SRC_SERVER := src/common/protocol.cpp src/common/config.cpp src/common/csv_writer.cpp
+COMMON_SRC_CLIENT := src/common/protocol.cpp src/common/config.cpp src/common/client_ops.cpp
 
-SERVER_SRC := server/main.cpp \
-              server/scheduler_factory.cpp \
-              server/scheduler_fcfs.cpp \
-              server/scheduler_sjf.cpp \
-              server/scheduler_rr.cpp \
-              server/scheduler_drr.cpp \
-              server/slice.cpp \
-              server/stub_scheduler.cpp \
+SERVER_SRC := src/server/main.cpp \
+              src/server/scheduler_factory.cpp \
+              src/server/scheduler_fcfs.cpp \
+              src/server/scheduler_sjf.cpp \
+              src/server/scheduler_rr.cpp \
+              src/server/scheduler_drr.cpp \
+              src/server/slice.cpp \
+              src/server/stub_scheduler.cpp \
               $(COMMON_SRC_SERVER)
 
-CLIENT_SRC := client/main.cpp \
-              client/load.cpp \
+CLIENT_SRC := src/client/main.cpp \
+              src/client/load.cpp \
               $(COMMON_SRC_CLIENT)
 
+# Sources live under src/ so the binaries can be ./server and ./client at the
+# repo root, exactly as the assignment's examples invoke them.
 .PHONY: all clean
-all: bin/server bin/client
+all: server client
 
-bin/server: $(SERVER_SRC) | bin
+server: $(SERVER_SRC)
 	$(CXX) $(CXXFLAGS) -o $@ $(SERVER_SRC) $(LDFLAGS)
 
-bin/client: $(CLIENT_SRC) | bin
+client: $(CLIENT_SRC)
 	$(CXX) $(CXXFLAGS) -o $@ $(CLIENT_SRC) $(LDFLAGS)
 
-bin:
-	mkdir -p bin
-
 clean:
-	rm -rf bin
+	rm -f server client

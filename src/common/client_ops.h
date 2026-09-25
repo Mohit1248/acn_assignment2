@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <string>
 
-// Shared by client/main.cpp (C1) and client/load.cpp (C3), so the load
+// Shared by src/client/main.cpp (C1) and src/client/load.cpp (C3), so the load
 // driver reuses the exact same exchange code a plain `put`/`get` uses.
 // Implementation owner: Mohit, Stage 1 (C2).
 

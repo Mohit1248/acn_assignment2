@@ -4,12 +4,10 @@
 Cells: fcfs/sjf/rr/drr at the reference config (4 server threads, 8 client
 threads), plus fcfs/rr again at server_threads=1.
 
-NOTE: this needs the real accept loop (S2/S3/S9, Stage 1, teammate) wired
-into ./bin/server. Until then, the server process exits right after
-parsing its CLI flags, so every run here will fail at "server never became
-healthy" - that's expected, not a bug in this script; point --server-bin
-at any binary speaking the same CLI + wire protocol to smoke-test the
-orchestration itself in the meantime.
+NOTE: until Stage 2 (K1-K4) lands, ./server ignores --sched and always uses
+the FIFO stub scheduler, so every cell behaves like fcfs - the orchestration
+works, but the numbers are not meaningful for the report yet. Run `make`
+first; the binaries are ./server and ./client at the repo root.
 
 Usage:
     python3 run_experiments.py                      # all 6 cells
@@ -117,8 +115,8 @@ def run_one(run, index, args, results_dir):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--server-bin", default=os.path.join(REPO_ROOT, "bin", "server"))
-    ap.add_argument("--client-bin", default=os.path.join(REPO_ROOT, "bin", "client"))
+    ap.add_argument("--server-bin", default=os.path.join(REPO_ROOT, "server"))
+    ap.add_argument("--client-bin", default=os.path.join(REPO_ROOT, "client"))
     ap.add_argument("--results-dir", default=os.path.join(REPO_ROOT, "results"))
     ap.add_argument("--requests", type=int, default=N_REQUESTS)
     ap.add_argument("--health-timeout", type=float, default=10)

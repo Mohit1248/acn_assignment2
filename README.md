@@ -12,11 +12,11 @@ touching K4/A23.**
 **Phase 0 (joint contracts) complete. Stage 1 (parallel tracks) is complete
 and merged into `main`.** Stage 2 (the scheduler core, K1-K4) is next.
 
-- Mohit: `/client/*`, `/common/client_ops.*`, workload + experiment scripts
+- Mohit: `src/client/*`, `src/common/client_ops.*`, workload + experiment scripts
   (C1-C7): all done. See "Experiment scripts" below for what each script does
   and how it was verified.
-- Teammate: `/server/*` (except the scheduler core) plus the socket
-  primitives in `common/protocol.cpp` (S1-S9): done and tested - see "Stage 1
+- Teammate: `src/server/*` (except the scheduler core) plus the socket
+  primitives in `src/common/protocol.cpp` (S1-S9): done and tested - see "Stage 1
   implementation notes (server-infra track)" below.
 
 The sjf/rr/drr policies and `serve_slice` are still `TODO` stubs pending
@@ -30,28 +30,28 @@ Ubuntu on Windows dev machines — POSIX sockets don't exist natively on
 Windows).
 
 ```
-make        # builds ./bin/server and ./bin/client
+make        # builds ./server and ./client at the repo root
 make clean
 ```
 
-Binaries build to `bin/` rather than repo root, since the spec's suggested
-top-level layout already uses the names `server/` and `client/` for source
-directories — a file and a directory can't share a name, so this is our
-Phase 0 resolution of that clash (stated per Ground Rules).
+All sources live under `src/` (`src/common`, `src/server`, `src/client`) so
+that the binaries can be `./server` and `./client` at the repo root, exactly
+as the assignment's examples invoke them - a file and a directory can't
+share a name, so the source folders can't also be called `server/`/`client/`.
 
 ## Run (server serves with the stub scheduler until Stage 2 lands)
 
 ```
-./bin/server --sched fcfs --file ./workload --config config.json --metrics-out metrics.csv
-./bin/client put text/notes.txt --config config.json
-./bin/client get notes.txt --config config.json
-./bin/client load ./workload --requests 2000 --config config.json
+./server --sched fcfs --file ./workload --config config.json --metrics-out metrics.csv
+./client put text/notes.txt --config config.json
+./client get notes.txt --config config.json
+./client load ./workload --requests 2000 --config config.json
 ```
 
 ## Repo layout
 
 ```
-common/    protocol.{h,cpp}   wire framing + request/response parsing, incl.
+src/common/ protocol.{h,cpp}   wire framing + request/response parsing, incl.
                               read_header_line/read_exact/send_all (done)
            config.{h,cpp}     config.json schema + validation (locked)
            csv_writer.{h,cpp} per-request metrics CSV (locked)
@@ -60,7 +60,7 @@ common/    protocol.{h,cpp}   wire framing + request/response parsing, incl.
            clock.h            CLOCK_MONOTONIC timestamp helper
            logging.h          A14 fire-log line format (locked)
            third_party/       vendored nlohmann/json.hpp (v3.11.3)
-server/    main.cpp           CLI, acceptor/admission/worker threads, shutdown (S1-S9, done)
+src/server/ main.cpp           CLI, acceptor/admission/worker threads, shutdown (S1-S9, done)
            scheduler.h        IScheduler interface + serve_slice contract (locked)
            queue.h            shared thread-safe request queue helper (locked)
            scheduler_fcfs.cpp real fcfs implementation (reference for the others)
@@ -69,7 +69,7 @@ server/    main.cpp           CLI, acceptor/admission/worker threads, shutdown (
            stub_scheduler.{h,cpp}  throwaway FIFO/whole-file path for early
                               end-to-end testing during Stage 1 - does NOT
                               satisfy A5/A6, never use it for experiments
-client/    main.cpp           CLI dispatch (C1 - done, Mohit)
+src/client/ main.cpp           CLI dispatch (C1 - done, Mohit)
            load.{h,cpp}       experiment driver (C3 - done, Mohit)
 scripts/   common.py          shared constants/helpers (Q, N, CSV loading,
                               percentile calc, size-class classification)
@@ -163,7 +163,7 @@ error: malformed JSON: <parser detail>
   parameters since the function can't know how much to send or whether to
   batch without them. Confirm this doesn't surprise anyone at the Stage 2
   (K1-K4) kickoff.
-- **Scheduler interface** (`server/scheduler.h`): `enqueue`/`next`/`requeue`/
+- **Scheduler interface** (`src/server/scheduler.h`): `enqueue`/`next`/`requeue`/
   `queue_depth`/`shutdown` on `IScheduler`, plus a free `serve_slice`
   function (not a method) since it operates on a `Request*` + socket fd
   independent of which policy is active — the four `scheduler_*.cpp` files
@@ -177,7 +177,7 @@ error: malformed JSON: <parser detail>
 
 ## Stage 1 implementation notes (server-infra track)
 
-`server/main.cpp` implements the accept loop, worker pool, and signal-driven
+`src/server/main.cpp` implements the accept loop, worker pool, and signal-driven
 graceful shutdown.
 
 **Threading model (design decision, A5):** three roles, so admission is fully
@@ -222,7 +222,7 @@ enqueued, drained and answered.
   rejected with a clear error, A1).
 
 **Bugs found and fixed during Stage 1:**
-1. `common/protocol.cpp`'s socket I/O was left as no-op stub code from Phase 0,
+1. `src/common/protocol.cpp`'s socket I/O was left as no-op stub code from Phase 0,
    so every request got "connection reset by peer". Fixed with real
    `recv()`/`send()` loops plus `SO_RCVTIMEO` for the header-read timeout.
 2. The CSV `rounds` column always wrote `0`. A23 requires `rounds=1` for
