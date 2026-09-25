@@ -80,7 +80,13 @@ Args parse_args(int argc, char** argv) {
             args.file_dir = next_val("--file");
             have_file = true;
         } else if (a == "--p") {
-            args.p_lines = std::atoi(next_val("--p").c_str());
+            std::string v = next_val("--p");
+            char* end = nullptr;
+            long n = std::strtol(v.c_str(), &end, 10);
+            if (end == v.c_str() || *end != '\0' || n < 1) {
+                usage_error("--p must be a positive integer (lines per write)");
+            }
+            args.p_lines = static_cast<int>(n);
         } else if (a == "--config") {
             args.config_path = next_val("--config");
         } else if (a == "--metrics-out") {

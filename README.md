@@ -208,6 +208,18 @@ enqueued, drained and answered.
 - A PUT declaring more than `kMaxPutBytes` (1 GiB) is rejected at admission
   with `ERR`, and any exception raised while serving one request is caught,
   answered with `ERR`, and does not take down the worker or the server.
+- **PUT is atomic**: the body is written to `<name>.tmp.<request id>` and
+  `rename()`d over the destination. Writing in place (`ofstream` + truncate)
+  let a concurrent GET of the same name see a half-written or empty file:
+  27% of GETs (1142 of 4282) came back truncated in a 6 s test with 4 GET and
+  4 PUT clients on one file, and `load` does exactly this (50% GET / 50% PUT
+  over 3 files, 8 threads), which would have corrupted the `bytes` column and
+  SJF's size key. **Stage 2 note (K1/K2):** the real `serve_slice` GET path
+  should open the file once, take the size from `fstat` on that descriptor,
+  and keep the descriptor in the `Request` across preemptions, so every round
+  reads the same version of the file that was sized at admission.
+- `--p` must be a positive integer (`--p 0`, `--p -3`, `--p abc` are
+  rejected with a clear error, A1).
 
 **Bugs found and fixed during Stage 1:**
 1. `common/protocol.cpp`'s socket I/O was left as no-op stub code from Phase 0,

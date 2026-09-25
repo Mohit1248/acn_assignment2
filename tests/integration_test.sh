@@ -149,6 +149,49 @@ ROWS=$(( $(wc -l < "$W/f.csv") - 1 ))
 awk -F, 'NR>1 && $5 != 1 {bad=1} END{exit bad}' "$W/f.csv" \
    && pass "rounds == 1 on every row (fcfs, A23)" || fail "rounds != 1 on some row"
 
+# ---- G. concurrent PUT + GET of the SAME file must never return a torn file (A7) ----
+start_server 19807 4 "$W/g.csv"
+G=$(python3 - "$R/workload/large.txt" <<'EOF'
+import socket, threading, time, sys
+orig = open(sys.argv[1], "rb").read()
+stop = time.time() + 4
+bad, n, lock = [], {"get": 0}, threading.Lock()
+def hdr(s):
+    b = b""
+    while not b.endswith(b"\n"): b += s.recv(1)
+    return b.decode().split()
+def getter():
+    while time.time() < stop:
+        s = socket.create_connection(("127.0.0.1", 19807)); s.sendall(b"GET large.txt\n")
+        size = int(hdr(s)[1]); data = b""
+        while len(data) < size:
+            c = s.recv(65536)
+            if not c: break
+            data += c
+        s.close()
+        with lock:
+            n["get"] += 1
+            if size != len(orig) or data != orig: bad.append(size)
+def putter():
+    while time.time() < stop:
+        s = socket.create_connection(("127.0.0.1", 19807)); s.sendall(b"PUT large.txt %d\n" % len(orig)); hdr(s)
+        s.sendall(orig); hdr(s); s.close()
+ts = [threading.Thread(target=getter) for _ in range(4)] + [threading.Thread(target=putter) for _ in range(4)]
+[t.start() for t in ts]; [t.join() for t in ts]
+print(len(bad), n["get"])
+EOF
+)
+set -- $G
+[ "$1" = "0" ] && [ "${2:-0}" -gt 50 ] && pass "0 torn GETs out of $2 during concurrent PUT+GET of one file" \
+                                       || fail "$1 torn GETs out of ${2:-?} during concurrent PUT+GET"
+stop_server
+
+# ---- H. --p must be a positive integer ----
+for bad in 0 -3 abc; do
+  "$BIN/server" --sched fcfs --file "$W/data" --p "$bad" >/dev/null 2>&1 \
+     && fail "--p $bad was accepted" || pass "--p $bad rejected"
+done
+
 echo
 [ "$FAILS" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "$FAILS CHECK(S) FAILED"
 exit "$FAILS"

@@ -1,5 +1,6 @@
 #include "stub_scheduler.h"
 
+#include <cstdio>
 #include <fstream>
 #include <vector>
 
@@ -66,13 +67,27 @@ bool stub_serve_whole(Request* req, int fd, const std::string& full_path) {
         return false;
     }
 
-    std::ofstream out(full_path, std::ios::binary | std::ios::trunc);
-    if (!out) {
+    // Write to a temp file, then rename() it over the destination. rename is
+    // atomic on POSIX, so a concurrent GET of the same name always sees a
+    // complete old or complete new file - never the truncated/half-written one
+    // that an in-place ofstream(trunc) exposes. (The load driver PUTs and GETs
+    // the same few files from many threads, so this race is hit constantly.)
+    std::string tmp_path = full_path + ".tmp." + std::to_string(req->id);
+    bool wrote = false;
+    {
+        std::ofstream out(tmp_path, std::ios::binary | std::ios::trunc);
+        if (out) {
+            if (req->bytes > 0) out.write(buf.data(), static_cast<std::streamsize>(req->bytes));
+            out.flush();
+            wrote = static_cast<bool>(out);
+        }
+    }
+    if (!wrote || std::rename(tmp_path.c_str(), full_path.c_str()) != 0) {
+        std::remove(tmp_path.c_str());
         std::string err = format_err("cannot write file");  // A24: never a silent close
         send_all(fd, err.data(), err.size());
         return false;
     }
-    if (req->bytes > 0) out.write(buf.data(), static_cast<std::streamsize>(req->bytes));
     req->byte_offset = req->bytes;
 
     std::string done = format_ok(0);
