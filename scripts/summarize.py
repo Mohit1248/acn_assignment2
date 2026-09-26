@@ -6,7 +6,7 @@
 import os
 import sys
 
-from metrics import ALL_CELLS, CLASSES, REFERENCE, across, across_a14, load_all
+from metrics import ALL_CELLS, CLASSES, REFERENCE, across, across_a14, fmt_count, load_all
 
 results = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
@@ -59,7 +59,7 @@ for cell in ("rr_ref", "drr_ref", "rr_st1", "drr_st1"):
         f = across(d, cell, lambda m, c=c: m["by_class"][c]["forfeited"])["median"]
         r = across(d, cell, lambda m, c=c: m["by_class"][c]["rounds_mean_get"])["median"]
         parts.append(f"{c}: forf={f:9.0f} rounds/GET={r:4.1f}")
-    print(f"{cell:8s} A14={across_a14(d, cell)['median']:.0f}  " + "  ".join(parts))
+    print(f"{cell:8s} A14={fmt_count(across_a14(d, cell)['median'])}  " + "  ".join(parts))
 
 print("\n== A30 aside: --p ==")
 for name, m in d["aside"].items():

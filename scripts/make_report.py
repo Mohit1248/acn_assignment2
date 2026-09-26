@@ -28,7 +28,7 @@ from reportlab.platypus import (Image, KeepTogether, Paragraph, SimpleDocTemplat
 
 from common import N_REQUESTS, QUANTUM  # noqa: E402
 from metrics import (ALL_CELLS, CLASSES, REFERENCE, across, across_a14,  # noqa: E402
-                     load_all)
+                     fmt_count, load_all)
 
 AUTHORS = os.environ.get("REPORT_AUTHORS", "Mohit and teammate")  # e.g. REPORT_AUTHORS="Name1 (entry no), Name2 (entry no)"
 RESULTS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "results")
@@ -447,14 +447,14 @@ def build_pdf():
                      *(f"{med(c, lambda m, cl=cls: m['by_class'][cl]['forfeited']):,.0f}" for cls in CLASSES),
                      f"{med(c, lambda m: m['by_class']['medium']['rounds_mean_get']):.1f}",
                      f"{med(c, lambda m: m['by_class']['large']['rounds_mean_get']):.1f}",
-                     f"{across_a14(D, c)['median']:.0f}",
+                     fmt_count(across_a14(D, c)['median']),
                      f"{slow(c, 'large'):.0f} / {slow(c, 'large', 'slow_p99'):.0f}"])
     t = table(rows, [1.45 * inch, 0.6 * inch, 0.75 * inch, 0.85 * inch, 0.65 * inch, 0.55 * inch, 0.7 * inch, 1.3 * inch], header_rows=2)
     t.setStyle(TableStyle([("SPAN", (1, 0), (3, 0)), ("SPAN", (4, 0), (5, 0))]))
     story.append(KeepTogether([
         h4,
-        P(f"<b>Table 3.</b> Long-line comparison, median over {K} runs. A14 fired {a14_rr:.0f} times per rr run at the "
-          f"reference configuration and {a14_rr1:.0f} at one thread (range {a14_lo:.0f}-{a14_hi:.0f} over all runs): "
+        P(f"<b>Table 3.</b> Long-line comparison, median over {K} runs. A14 fired {fmt_count(a14_rr)} times per rr run at the "
+          f"reference configuration and {fmt_count(a14_rr1)} at one thread (range {fmt_count(a14_lo)}-{fmt_count(a14_hi)} over all runs): "
           f"exactly the 6 long lines of every large-file GET (about {n_get_large:.0f} GETs per run) and never under drr.", SMALL),
         t]))
     story.append(Spacer(1, 3))

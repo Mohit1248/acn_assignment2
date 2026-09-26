@@ -15,7 +15,7 @@ single-header `nlohmann/json.hpp` (`src/common/third_party/`).
 
 ```
 make            # ./server and ./client at the repo root  (g++ -std=c++17 -pthread)
-make test       # unit tests of the scheduling core (72 checks)
+make test       # unit tests of the scheduling core (72 checks; needs tests/ from the git repo)
 make clean
 ```
 
@@ -218,8 +218,9 @@ rr-drr pair.
 
 The environment (WSL2 on a laptop, loopback) is noisy, so every cell is run 5
 times and the report uses medians; see the report for details. `results/`
-holds every run: `results/run1..run5/<cell>.csv` with the server log and the
-config used, and `results/aside_p*` for the `--p` aside (A30).
+holds every run: `results/run1..run5/<cell>.csv` (the metrics CSVs), and
+`results/aside_p*` for the `--p` aside (A30). `run_all.sh` also writes each run's server
+log and config next to its CSV; those are kept in the git repository, not the zip.
 
 ## Layout
 
@@ -232,12 +233,16 @@ src/client/   main.cpp (put/get/load CLI), load.{h,cpp} (experiment driver)
 scripts/      gen_workload.py, run_experiments.py, run_all.sh, analysis.py, compare_rr_drr.py,
               metrics.py, summarize.py, make_report.py, package.py, common.py
 workload/     small.txt medium.txt large.txt
-tests/        test_slice.cpp, integration_test.sh, manual test_*.py
-results/      metrics CSVs and logs of all runs
+tests/        test_slice.cpp, integration_test.sh, manual test_*.py   (git repo only, not in the submission zip)
+results/      metrics CSVs of all runs (the git repo also keeps each run's server log and config)
 ```
 
 ## Packaging
 
-`python3 scripts/package.py <entry1> <entry2>` writes `<entry1>_<entry2>_A.zip`
-with the sources, Makefile, scripts, README, report, plots (top level),
-workload and metrics CSVs.
+`python3 scripts/package.py <entry1> <entry2>` writes `<entry1>_<entry2>_A.zip` with
+exactly what the assignment asks for: sources, Makefile, scripts, README, report,
+plots (top level), the workload and the metrics CSVs. The tests (`tests/`), and the
+per-run server logs and config copies that `run_all.sh` writes next to each CSV, live
+in the git repository only; the logs hold the `A14 ...` lines the A14 counts in the
+report come from, so those counts show as `n/a` if the report is regenerated from the
+zip without re-running the experiments.
