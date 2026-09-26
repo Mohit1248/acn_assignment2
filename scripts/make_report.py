@@ -255,8 +255,15 @@ def build_pdf():
                 else "no consistent difference between the pairs; the waiting effect is smaller than the host's noise")
     p1 = [m for k, m in aside.items() if k.startswith("aside_p1_")]
     p10 = [m for k, m in aside.items() if k.startswith("aside_p10_")]
-    sc1 = statistics.median(m["send_calls"] for m in p1)
-    sc10 = statistics.median(m["send_calls"] for m in p10)
+    # send() counts come from each run's server log, which the submission zip does not ship
+    have_sc = all(m["send_calls"] is not None for m in p1 + p10)
+    sc1 = statistics.median(m["send_calls"] for m in p1) if have_sc else float("nan")
+    sc10 = statistics.median(m["send_calls"] for m in p10) if have_sc else float("nan")
+    if have_sc:
+        sc_txt = (f"send() calls fell from about {sc1:,.0f} to {sc10:,.0f} per run "
+                  f"({sc1 / sc10:.1f}x fewer, in every pair)")
+    else:
+        sc_txt = "the send() counts are in the server logs, which are not included here (n/a)"
     wait1 = statistics.median(m["wait_p50_ns"] for m in p1) / 1000
     wait10 = statistics.median(m["wait_p50_ns"] for m in p10) / 1000
     thr1 = statistics.median(m["throughput"] for m in p1)
@@ -524,8 +531,7 @@ def build_pdf():
     story.append(P("6. Aside: --p (A30) and caveats", H1))
     story.append(P(
         f"<b>--p</b> changes system calls, not scheduling. fcfs at the reference configuration with --p 1 vs --p 10 "
-        f"(3 alternating pairs): send() calls fell from about {sc1:,.0f} to {sc10:,.0f} per run "
-        f"({sc1 / sc10:.1f}x fewer, in every pair). Median waiting was {wait1:.0f} us with --p 1 and {wait10:.0f} us with "
+        f"(3 alternating pairs): {sc_txt}. Median waiting was {wait1:.0f} us with --p 1 and {wait10:.0f} us with "
         f"--p 10 ({wait_txt}). Throughput was too noisy to rank (medians {thr1:.0f} vs {thr10:.0f} req/s, single runs "
         f"{min(m['throughput'] for m in p1 + p10):.0f}-{max(m['throughput'] for m in p1 + p10):.0f}). The scheduling columns "
         f"are unaffected (rounds = 1, forfeited_bytes = 0 in both). "
