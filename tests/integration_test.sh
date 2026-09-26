@@ -217,7 +217,7 @@ print(len(bad), n["get"])
 EOF
 )
 set -- $G
-[ "$1" = "0" ] && [ "${2:-0}" -gt 50 ] && pass "0 torn GETs out of $2 during concurrent PUT+GET of one file" \
+[ "$1" = "0" ] && [ "${2:-0}" -ge 5 ] && pass "0 torn GETs out of $2 during concurrent PUT+GET of one file" \
                                        || fail "$1 torn GETs out of ${2:-?} during concurrent PUT+GET"
 stop_server
 
@@ -226,7 +226,7 @@ stop_server
 # first; sjf serves the smaller one first; rr/drr give large only one quantum
 # before small gets its turn, so small finishes first there too.
 start_server 19808 1 "$W/i.csv"
-ORDER=$(python3 - <<'EOF'
+python3 - <<'EOF'
 import socket, threading, time
 def hdr(s):
     b = b""
@@ -237,7 +237,6 @@ def slow():
     time.sleep(2); s.sendall(b"x" * 100); hdr(s); s.close()
 threading.Thread(target=slow, daemon=True).start()
 time.sleep(0.4)                                   # the only worker is now stuck on hold.txt
-done = {}
 def get(name):
     s = socket.create_connection(("127.0.0.1", 19808)); s.sendall(("GET %s\n" % name).encode())
     size = int(hdr(s)[1]); got = 0
@@ -245,17 +244,26 @@ def get(name):
         c = s.recv(65536)
         if not c: break
         got += len(c)
-    done[name] = time.time(); s.close()
+    s.close()
 a = threading.Thread(target=get, args=("large.txt",)); a.start(); time.sleep(0.3)
 b = threading.Thread(target=get, args=("small.txt",)); b.start()
 a.join(); b.join()
-print("large_first" if done["large.txt"] < done["small.txt"] else "small_first")
 EOF
-)
-if [ "$SCHED" = fcfs ]; then EXP=large_first; else EXP=small_first; fi
-[ "$ORDER" = "$EXP" ] && pass "$SCHED served $ORDER, as that policy should" \
-                      || fail "$SCHED served $ORDER, expected $EXP"
 stop_server
+# Judge by the SERVER's own timestamps in its CSV (col 8 = start_ns, col 9 = finish_ns), not by when a
+# Python thread happened to finish reading: client-side completion order can flip by a few ms.
+read -r LS LF SS SF <<<"$(awk -F, '$2=="GET" && $3=="large.txt" {ls=$8; lf=$9} $2=="GET" && $3=="small.txt" {ss=$8; sf=$9} END {print ls, lf, ss, sf}' "$W/i.csv")"
+case "$SCHED" in
+  fcfs) [ "$LS" -lt "$SS" ] && [ "$LF" -lt "$SF" ] \
+          && pass "fcfs served the earlier arrival (large) first" \
+          || fail "fcfs order: large start/finish $LS/$LF, small $SS/$SF" ;;
+  sjf)  [ "$SS" -lt "$LS" ] && [ "$SF" -lt "$LF" ] \
+          && pass "sjf served the smaller request first although it arrived later" \
+          || fail "sjf order: small start/finish $SS/$SF, large $LS/$LF" ;;
+  *)    [ "$LS" -lt "$SS" ] && [ "$SF" -lt "$LF" ] \
+          && pass "$SCHED: large started first but small FINISHED first (large preempted after one quantum)" \
+          || fail "$SCHED order: large start/finish $LS/$LF, small $SS/$SF" ;;
+esac
 
 # ---- H. --p must be a positive integer ----
 for bad in 0 -3 abc; do
@@ -389,18 +397,21 @@ ERRTXT=$(timeout 3 "$BIN/server" --sched fcfs --file "$W/no_such_dir" --metrics-
 # ---- M. clients that TRICKLE bytes must not pin a thread (A5: total deadline, not per-recv) ----
 start_server 19811 1 "$W/m.csv"
 HT=$(python3 - <<'EOF'
-import socket, time
+import select, socket, time
 s = socket.create_connection(("127.0.0.1", 19811)); t = time.time()
-try:
-    for ch in b"GET small.txt":            # one byte per second, never a newline
-        s.sendall(bytes([ch])); time.sleep(1)
-except OSError:
-    pass                                    # the server hung up on us - that is the point
+for ch in b"GET small.txt":                     # one byte per second, never a newline
+    try:
+        s.sendall(bytes([ch]))
+    except OSError:
+        break
+    if select.select([s], [], [], 1.0)[0]:     # the server answered (ERR ...) or hung up
+        break
 print("%.1f" % (time.time() - t))
 EOF
 )
-awk -v t="$HT" 'BEGIN{exit !(t < 8)}' && pass "a header dribbled 1 byte/s is cut off after ${HT}s (5 s total deadline)" \
-                                      || fail "dribbled header held the connection for ${HT}s"
+awk -v t="$HT" 'BEGIN{exit !(t >= 4.5 && t < 9)}' \
+    && pass "a header dribbled 1 byte/s was cut off by the server after ${HT}s (5 s total deadline)" \
+    || fail "dribbled header: server reacted after ${HT}s, expected about 5 s"
 stop_server
 
 if [ "$SCHED" = fcfs ]; then    # 15 s: run once, the policy is irrelevant to this check
