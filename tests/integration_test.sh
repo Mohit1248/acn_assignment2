@@ -23,6 +23,14 @@ fail() { echo "FAIL: $1"; FAILS=$((FAILS + 1)); }
 mkdir -p "$W/data" "$W/dl"
 cp "$R"/workload/*.txt "$W/data/"
 
+wait_up() {  # poll HEALTH until the server answers (max 5 s)
+  for _ in $(seq 1 100); do
+    printf "HEALTH\n" | nc -w 1 127.0.0.1 "$1" 2>/dev/null | grep -q "^OK" && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
 start_server() {  # port worker_threads csv_path
   python3 - "$1" "$2" "$R" "$W" <<'EOF'
 import json, sys
@@ -35,7 +43,7 @@ EOF
   "$BIN/server" --sched "$SCHED" $QARG --file "$W/data" --config "$W/config_$1.json" \
       --metrics-out "$3" >"$W/server_$1.log" 2>&1 &
   SP=$!
-  sleep 0.6
+  wait_up "$1"
 }
 
 stop_server() { kill -TERM "$SP" 2>/dev/null; wait "$SP" 2>/dev/null; SP=""; }
@@ -254,6 +262,180 @@ for bad in 0 -3 abc; do
   "$BIN/server" --sched fcfs --file "$W/data" --p "$bad" >/dev/null 2>&1 \
      && fail "--p $bad was accepted" || pass "--p $bad rejected"
 done
+
+# ---- J. a PUT whose body arrives in the SAME segment as its header; zero-byte files;
+#         HEALTH never logged; SIGINT wrote the CSV; immediate restart on the same port ----
+mkdir -p "$W/dj"
+python3 - "$W" "$R" <<'EOF'
+import json, sys
+w, r = sys.argv[1:3]
+c = json.load(open(r + "/config.json")); c["server"]["port"] = 19809
+json.dump(c, open(w + "/config_19809.json", "w"))
+EOF
+JQ=""; { [ "$SCHED" = rr ] || [ "$SCHED" = drr ]; } && JQ="--quantum 4"      # 11-byte body = 3 rounds
+"$BIN/server" --sched "$SCHED" $JQ --file "$W/dj" --config "$W/config_19809.json" \
+    --metrics-out "$W/j.csv" >"$W/server_j.log" 2>&1 &
+SP=$!; wait_up 19809
+python3 - <<'EOF'
+import socket
+def rt(req):
+    s = socket.create_connection(("127.0.0.1", 19809)); s.sendall(req); s.settimeout(5); out = b""
+    while True:
+        c = s.recv(4096)
+        if not c: break
+        out += c
+    return out
+rt(b"PUT together.txt 11\nhello world")            # header and whole body in one send()
+rt(b"PUT empty.txt 0\n")
+EOF
+[ "$(cat "$W/dj/together.txt" 2>/dev/null)" = "hello world" ] \
+    && pass "PUT with header+body in one segment stored intact (leftover bytes kept)" \
+    || fail "header+body in one segment: got '$(cat "$W/dj/together.txt" 2>/dev/null)'"
+[ -f "$W/dj/empty.txt" ] && [ ! -s "$W/dj/empty.txt" ] && pass "zero-byte PUT creates an empty file" || fail "zero-byte PUT"
+Z=$(python3 - <<'EOF'
+import socket
+s = socket.create_connection(("127.0.0.1", 19809)); s.sendall(b"GET empty.txt\n"); s.settimeout(5)
+out = b""
+while True:
+    c = s.recv(64)
+    if not c: break
+    out += c
+print(out.decode().strip())
+EOF
+)
+[ "$Z" = "OK 0" ] && pass "zero-byte GET replies 'OK 0' and nothing else" || fail "zero-byte GET replied '$Z'"
+for i in 1 2 3; do printf "HEALTH\n" | nc -w 1 127.0.0.1 19809 >/dev/null; done
+kill -INT "$SP"; wait "$SP" 2>/dev/null; JSTATUS=$?; SP=""
+[ "$JSTATUS" = 0 ] && pass "SIGINT: clean exit" || fail "SIGINT exit status $JSTATUS"
+JROWS=$(( $(wc -l < "$W/j.csv") - 1 ))
+[ "$JROWS" = 3 ] && pass "CSV has 3 rows after SIGINT (2 PUTs + 1 GET; 3 HEALTH probes not logged)" \
+                 || fail "CSV has $JROWS rows, expected 3"
+grep -q "requests_served=3" "$W/server_j.log" && pass "shutdown summary printed" || fail "no shutdown summary"
+"$BIN/server" --sched "$SCHED" $JQ --file "$W/dj" --config "$W/config_19809.json" \
+    --metrics-out "$W/j2.csv" >"$W/server_j2.log" 2>&1 &
+SP=$!
+wait_up 19809 && pass "restart on the same port straight after traffic (SO_REUSEADDR)" || fail "restart refused"
+stop_server
+
+# ---- K. byte-exact upload+download of every workload file, small quantum, several --p ----
+for PP in 1 7 1000; do
+  rm -rf "$W/dk" "$W/ck"; mkdir -p "$W/dk" "$W/ck"
+  python3 - "$W" "$R" <<'EOF'
+import json, sys
+w, r = sys.argv[1:3]
+c = json.load(open(r + "/config.json")); c["server"]["port"] = 19810
+json.dump(c, open(w + "/config_19810.json", "w"))
+EOF
+  KQ=""; { [ "$SCHED" = rr ] || [ "$SCHED" = drr ]; } && KQ="--quantum 1000"
+  "$BIN/server" --sched "$SCHED" $KQ --p "$PP" --file "$W/dk" --config "$W/config_19810.json" \
+      --metrics-out "$W/k.csv" >/dev/null 2>&1 &
+  SP=$!; wait_up 19810; KOK=1
+  for F in small medium large; do
+    "$BIN/client" put "$R/workload/$F.txt" --config "$W/config_19810.json" || KOK=0
+    cmp -s "$R/workload/$F.txt" "$W/dk/$F.txt" || KOK=0
+    (cd "$W/ck" && "$BIN/client" get "$F.txt" --config "$W/config_19810.json") || KOK=0
+    cmp -s "$R/workload/$F.txt" "$W/ck/$F.txt" || KOK=0
+  done
+  [ "$KOK" = 1 ] && pass "$SCHED --p $PP $KQ: all workload files round-trip byte-exact" \
+                 || fail "$SCHED --p $PP $KQ: transfer mismatch"
+  stop_server
+done
+
+# ---- L. bad configuration must be rejected with a message naming the field (not start a dead server) ----
+mkdir -p "$W/dl"
+python3 - "$W" "$R" <<'EOF'
+import copy, json, sys
+w, r = sys.argv[1:3]
+base = json.load(open(r + "/config.json"))
+def mk(name, mut):
+    c = copy.deepcopy(base); mut(c); json.dump(c, open("%s/bad_%s.json" % (w, name), "w"))
+mk("threads0", lambda c: c["server"].__setitem__("server_threads", 0))
+mk("threadsneg", lambda c: c["server"].__setitem__("server_threads", -2))
+mk("client0", lambda c: c["server"].__setitem__("client_threads", 0))
+mk("port0", lambda c: c["server"].__setitem__("port", 0))
+mk("portstr", lambda c: c["server"].__setitem__("port", "9000"))
+mk("noport", lambda c: c["server"].pop("port"))
+open(w + "/bad_broken.json", "w").write('{"server": {')
+EOF
+for CFG_CASE in "threads0:server.server_threads" "threadsneg:server.server_threads" "client0:server.client_threads" \
+                "port0:server.port" "portstr:server.port" "noport:server.port" "broken:JSON"; do
+  NAME=${CFG_CASE%%:*}; FIELD=${CFG_CASE##*:}
+  ERRTXT=$(timeout 3 "$BIN/server" --sched fcfs --file "$W/dl" --config "$W/bad_$NAME.json" --metrics-out "$W/l.csv" 2>&1 >/dev/null)
+  RC=$?
+  if [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && echo "$ERRTXT" | grep -q "$FIELD"; then pass "config '$NAME' rejected (names $FIELD)"
+  else fail "config '$NAME': rc=$RC output='$ERRTXT'"; fi
+done
+for BADQ in 0 -5 abc; do
+  "$BIN/server" --sched rr --quantum "$BADQ" --file "$W/dl" >/dev/null 2>&1 \
+      && fail "--quantum $BADQ accepted" || pass "--quantum $BADQ rejected"
+done
+start_server 19813 1 "$W/nul.csv"
+NULR=$(python3 - <<'EOF'
+import socket
+def rt(req):
+    s = socket.create_connection(("127.0.0.1", 19813)); s.sendall(req); s.settimeout(5)
+    return s.recv(200).decode(errors="replace").strip()
+print(rt(b"GET ..\x00x\n") + " | " + rt(b"PUT a\x00b 3\n"))
+EOF
+)
+case "$NULR" in ERR*"| ERR"*) pass "names containing a NUL byte are rejected ($NULR)";; *) fail "NUL byte name: '$NULR'";; esac
+stop_server
+ERRTXT=$(timeout 3 "$BIN/server" --sched fcfs --file "$W/no_such_dir" --metrics-out "$W/l.csv" 2>&1 >/dev/null); RC=$?
+{ [ "$RC" -ne 0 ] && [ "$RC" -ne 124 ] && echo "$ERRTXT" | grep -q -- "--file"; } \
+    && pass "--file pointing at a missing directory rejected" || fail "--file missing dir: rc=$RC '$ERRTXT'"
+"$BIN/client" load "$W/no_such_workload" --requests 5 --config "$R/config.json" >/dev/null 2>&1 \
+    && fail "load on a missing workload dir exited 0" || pass "load on a missing workload dir exits non-zero"
+
+# ---- M. clients that TRICKLE bytes must not pin a thread (A5: total deadline, not per-recv) ----
+start_server 19811 1 "$W/m.csv"
+HT=$(python3 - <<'EOF'
+import socket, time
+s = socket.create_connection(("127.0.0.1", 19811)); t = time.time()
+try:
+    for ch in b"GET small.txt":            # one byte per second, never a newline
+        s.sendall(bytes([ch])); time.sleep(1)
+except OSError:
+    pass                                    # the server hung up on us - that is the point
+print("%.1f" % (time.time() - t))
+EOF
+)
+awk -v t="$HT" 'BEGIN{exit !(t < 8)}' && pass "a header dribbled 1 byte/s is cut off after ${HT}s (5 s total deadline)" \
+                                      || fail "dribbled header held the connection for ${HT}s"
+stop_server
+
+if [ "$SCHED" = fcfs ]; then    # 15 s: run once, the policy is irrelevant to this check
+  start_server 19812 1 "$W/m2.csv"
+  BT=$(python3 - <<'EOF'
+import socket, threading, time
+def hdr(s):
+    b = b""
+    while not b.endswith(b"\n"): b += s.recv(1)
+    return b.decode().split()
+def dribble():
+    s = socket.create_connection(("127.0.0.1", 19812)); s.sendall(b"PUT slow.bin 100000\n"); hdr(s)
+    try:
+        for _ in range(40):                # 1 byte every 2 s: each recv() is well inside a 5 s timeout
+            s.sendall(b"x"); time.sleep(2)
+    except OSError:
+        pass
+threading.Thread(target=dribble, daemon=True).start()
+time.sleep(3)                               # the only worker is now stuck reading that body
+t = time.time()
+s = socket.create_connection(("127.0.0.1", 19812)); s.sendall(b"GET small.txt\n"); s.settimeout(30)
+size = int(hdr(s)[1]); got = 0
+while got < size:
+    c = s.recv(4096)
+    if not c: break
+    got += len(c)
+print("%.1f %d %d" % (time.time() - t, got, size))
+EOF
+  )
+  set -- $BT
+  { awk -v t="$1" 'BEGIN{exit !(t < 14)}' && [ "$2" = "$3" ]; } \
+      && pass "a trickled PUT body freed the only worker after ~${1}s; the queued GET was then served" \
+      || fail "trickled PUT body pinned the worker: GET took ${1:-?}s (got ${2:-?}/${3:-?} bytes)"
+  stop_server
+fi
 
 echo
 [ "$FAILS" -eq 0 ] && echo "ALL CHECKS PASSED" || echo "$FAILS CHECK(S) FAILED"

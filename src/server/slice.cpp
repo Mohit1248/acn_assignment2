@@ -25,6 +25,9 @@ constexpr uint64_t kUnbounded = std::numeric_limits<uint64_t>::max();
 // Lines longer than this are streamed in chunks instead of being copied into
 // the batch buffer, so one enormous line cannot force a huge allocation.
 constexpr uint64_t kChunk = 64 * 1024;
+// A PUT chunk (<= 64 KB) must arrive within this long in total. It stops a client that
+// trickles the body from pinning a worker (A5/A9); 10 s per 64 KB is a floor of ~6 KB/s.
+constexpr int kBodyChunkTimeoutMs = 10000;
 
 bool bounded(Policy p) { return p == Policy::RR || p == Policy::DRR; }
 
@@ -107,7 +110,10 @@ SliceResult serve_get(Request* r, int fd, const SliceParams& sp) {
 
     const bool bnd = bounded(sp.policy);
     uint64_t left = kUnbounded;
-    if (bnd) left = (sp.policy == Policy::DRR ? r->deficit : 0) + sp.quantum;  // A12 / A15
+    if (bnd) {  // A12 / A15 (saturating add: a huge --quantum must not wrap around)
+        const uint64_t carried = sp.policy == Policy::DRR ? r->deficit : 0;
+        left = carried > kUnbounded - sp.quantum ? kUnbounded : carried + sp.quantum;
+    }
 
     const int p = std::max(1, sp.p_lines);
     Batch batch;
@@ -204,7 +210,7 @@ SliceResult serve_put(Request* r, int fd, const SliceParams& sp) {
     uint64_t done = 0;
     while (done < take) {
         size_t n = static_cast<size_t>(std::min<uint64_t>(buf.size(), take - done));
-        if (!read_exact(fd, r->leftover, buf.data(), n)) {
+        if (!read_exact(fd, r->leftover, buf.data(), n, kBodyChunkTimeoutMs)) {
             send_error(fd, "body shorter than declared");
             return SliceResult::FAILED;
         }

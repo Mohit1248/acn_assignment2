@@ -26,7 +26,9 @@ for cell in ALL_CELLS:
     p50 = across(d, cell, lambda m: m["wait_p50_ns"])
     p99 = across(d, cell, lambda m: m["wait_p99_ns"])
     thr = across(d, cell, lambda m: m["throughput"])
-    print(f"{cell:9s} p50 {fmt(p50, 1000):22s} p99 {fmt(p99, 1000):26s} thr {fmt(thr):20s}")
+    r50 = across(d, cell, lambda m: m["resp_p50_ns"])
+    r99 = across(d, cell, lambda m: m["resp_p99_ns"])
+    print(f"{cell:9s} wait p50 {fmt(p50, 1000):20s} p99 {fmt(p99, 1000):24s} | resp p50 {fmt(r50, 1000):20s} p99 {fmt(r99, 1000):24s} | thr {fmt(thr):18s}")
 
 print("\n== normalised slowdown median (ns/byte): median [min-max]; and p99 ==")
 for cell in ALL_CELLS:

@@ -49,12 +49,15 @@ def run_metrics(csv_path, seed_count):
     rows = exclude_seed_rows(load_rows(csv_path), seed_count)
     n = len(rows)
     waiting = [r["start_ns"] - r["arrival_ns"] for r in rows]
+    response = [r["finish_ns"] - r["arrival_ns"] for r in rows]
     window_s = (max(r["finish_ns"] for r in rows) - min(r["arrival_ns"] for r in rows)) / 1e9
 
     m = {
         "n": n,
         "wait_p50_ns": _pct(waiting, 50),
         "wait_p99_ns": _pct(waiting, 99),
+        "resp_p50_ns": _pct(response, 50),
+        "resp_p99_ns": _pct(response, 99),
         "throughput": n / window_s,
         "window_s": window_s,
         "by_class": {},

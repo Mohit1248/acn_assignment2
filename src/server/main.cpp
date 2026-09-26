@@ -73,8 +73,8 @@ Args parse_args(int argc, char** argv) {
             std::string v = next_val("--quantum");
             char* end = nullptr;
             unsigned long long q = std::strtoull(v.c_str(), &end, 10);
-            if (end == v.c_str() || *end != '\0') {
-                usage_error("--quantum must be a non-negative integer");
+            if (end == v.c_str() || *end != '\0' || q == 0 || v[0] == '-') {
+                usage_error("--quantum must be a positive integer (bytes per round)");
             }
             args.quantum = q;
             args.has_quantum = true;
@@ -110,6 +110,12 @@ Args parse_args(int argc, char** argv) {
     }
     if (!needs_quantum && args.has_quantum) {
         usage_error("--quantum is not allowed with --sched fcfs or sjf");
+    }
+
+    // Without this the server starts fine and then fails every single request.
+    struct stat dir_st{};
+    if (::stat(args.file_dir.c_str(), &dir_st) != 0 || !S_ISDIR(dir_st.st_mode)) {
+        usage_error("--file '" + args.file_dir + "' is not an existing directory");
     }
 
     return args;

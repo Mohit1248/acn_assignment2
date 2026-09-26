@@ -43,7 +43,7 @@ def nearest_rank_percentile(sorted_values, p):
     n = len(sorted_values)
     if n == 0:
         return None
-    idx = math.ceil(p / 100 * n) - 1
+    idx = -((-int(p) * n) // 100) - 1  # ceil(p*n/100) - 1 in exact integer arithmetic
     idx = max(0, min(idx, n - 1))
     return sorted_values[idx]
 

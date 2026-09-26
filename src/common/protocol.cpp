@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <sys/socket.h>
@@ -140,6 +141,7 @@ bool is_filename_safe(const std::string& name) {
     if (name.empty()) return false;
     if (name == "." || name == "..") return false;
     if (name.find('/') != std::string::npos) return false;
+    if (name.find('\0') != std::string::npos) return false;  // would truncate the path at open()
     return true;
 }
 
@@ -147,19 +149,48 @@ bool is_filename_safe(const std::string& name) {
 // Implementation owner: Stage 1 "server infrastructure" track (S2/S3/S9).
 // Done.
 
+namespace {
+
+using Clock = std::chrono::steady_clock;
+
+// Arms SO_RCVTIMEO with the time left until `deadline`; false if none is left.
+// SO_RCVTIMEO alone bounds each recv() call, so a peer that sends one byte
+// every few seconds would never trip it and could hold a thread for hours.
+bool arm_remaining(int fd, Clock::time_point deadline) {
+    auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
+    if (left <= 0) return false;
+    struct timeval tv;
+    tv.tv_sec = static_cast<time_t>(left / 1000);
+    tv.tv_usec = static_cast<suseconds_t>((left % 1000) * 1000);  // never 0/0: that would mean "no timeout"
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    return true;
+}
+
+void set_recv_timeout(int fd, int ms) {
+    struct timeval tv;
+    tv.tv_sec = ms / 1000;
+    tv.tv_usec = (ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+}
+
+}  // namespace
+
 HeaderReadResult read_header_line(int fd, int timeout_ms) {
     HeaderReadResult r;
 
-    if (timeout_ms >= 0) {  // negative = leave the socket's existing timeout alone
-        struct timeval tv;
-        tv.tv_sec = timeout_ms / 1000;
-        tv.tv_usec = (timeout_ms % 1000) * 1000;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-    }
+    // timeout_ms bounds the WHOLE header read (negative = leave the socket's
+    // existing timeout alone), not each recv() individually.
+    const bool bounded = timeout_ms >= 0;
+    const auto deadline = Clock::now() + std::chrono::milliseconds(bounded ? timeout_ms : 0);
 
     std::string line;
     char buf[512];
     while (true) {
+        if (bounded && !arm_remaining(fd, deadline)) {
+            r.ok = false;
+            r.error = "header read timeout";
+            return r;
+        }
         ssize_t n = recv(fd, buf, sizeof(buf), 0);
         if (n < 0) {
             r.ok = false;
@@ -188,6 +219,9 @@ HeaderReadResult read_header_line(int fd, int timeout_ms) {
             }
             r.ok = true;
             r.line = line;
+            // arm_remaining() left only the time that was still unused as the
+            // per-recv() timeout; give later reads on this socket the full one.
+            if (bounded) set_recv_timeout(fd, timeout_ms);
             return r;
         }
         line.append(buf, static_cast<size_t>(n));
@@ -200,8 +234,10 @@ HeaderReadResult read_header_line(int fd, int timeout_ms) {
     }
 }
 
-bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n) {
+bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n, int total_timeout_ms) {
     size_t filled = 0;
+    const bool bounded = total_timeout_ms >= 0;
+    const auto deadline = Clock::now() + std::chrono::milliseconds(bounded ? total_timeout_ms : 0);
 
     // Drain leftover first - bytes already read off the socket during the
     // header read but not yet consumed.
@@ -215,8 +251,9 @@ bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n) {
     }
 
     while (filled < n) {
+        if (bounded && !arm_remaining(fd, deadline)) return false;  // took too long overall
         ssize_t r = recv(fd, out + filled, n - filled, 0);
-        if (r <= 0) return false;  // error or peer closed early
+        if (r <= 0) return false;  // error, timeout or peer closed early
         filled += static_cast<size_t>(r);
     }
     return true;

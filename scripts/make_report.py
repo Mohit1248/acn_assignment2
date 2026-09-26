@@ -183,6 +183,11 @@ def fig4():
 
 # ------------------------------------------------------------------- report --
 
+def disjoint(a, b):
+    """True if the [min, max] ranges of two across() results do not overlap."""
+    return a["max"] < b["min"] or b["max"] < a["min"]
+
+
 def rng(stat, scale=1.0, nd=0):
     return f"{stat['median'] / scale:.{nd}f} [{stat['min'] / scale:.{nd}f}-{stat['max'] / scale:.{nd}f}]"
 
@@ -231,6 +236,8 @@ def build_pdf():
     thr = {c: med(c, lambda m: m["throughput"]) for c in ALL_CELLS if any(c in r["cells"] for r in D["runs"])}
     w50 = {c: med(c, lambda m: m["wait_p50_ns"]) / 1000 for c in thr}
     w99 = {c: med(c, lambda m: m["wait_p99_ns"]) / 1000 for c in thr}
+    r50 = {c: med(c, lambda m: m["resp_p50_ns"]) / 1000 for c in thr}
+    r99 = {c: med(c, lambda m: m["resp_p99_ns"]) / 1000 for c in thr}
 
     n_get_large = statistics.median(r["cells"]["rr_ref"]["by_class"]["large"]["n_get"] for r in D["runs"])
     forf_large_get = med("rr_ref", lambda m: m["by_class"]["large"]["forfeited"] / max(1, m["by_class"]["large"]["n_get"]))
@@ -243,6 +250,9 @@ def build_pdf():
     a14_hi = max(across_a14(D, c)["max"] for c in ("rr_ref", "rr_st1"))
 
     aside = D["aside"]
+    pairs = [(aside[f"aside_p1_{k}"], aside[f"aside_p10_{k}"]) for k in "abc" if f"aside_p1_{k}" in aside]
+    wait_txt = ("lower with --p 10 in every pair" if all(b["wait_p50_ns"] < a["wait_p50_ns"] for a, b in pairs)
+                else "no consistent difference between the pairs; the waiting effect is smaller than the host's noise")
     p1 = [m for k, m in aside.items() if k.startswith("aside_p1_")]
     p10 = [m for k, m in aside.items() if k.startswith("aside_p10_")]
     sc1 = statistics.median(m["send_calls"] for m in p1)
@@ -254,6 +264,36 @@ def build_pdf():
 
     noise_x = max(across(D, c, lambda m: m["throughput"])["max"] / across(D, c, lambda m: m["throughput"])["min"]
                   for c in thr)
+    tf = across(D, "fcfs_ref", lambda m: m["throughput"])
+    trr = across(D, "rr_ref", lambda m: m["throughput"])
+    tdr = across(D, "drr_ref", lambda m: m["throughput"])
+    if disjoint(tf, trr) and disjoint(tf, tdr):
+        thr_ref_text = (f"fcfs's runs ({rng(tf)}) do not overlap the rr ({rng(trr)}) or drr ({rng(tdr)}) runs, so this cost "
+                        f"is real, about {100 * (1 - trr['median'] / tf['median']):.0f}% for rr and "
+                        f"{100 * (1 - tdr['median'] / tf['median']):.0f}% for drr.")
+    else:
+        thr_ref_text = (f"Medians are {100 * (1 - trr['median'] / tf['median']):.0f}% (rr) and "
+                        f"{100 * (1 - tdr['median'] / tf['median']):.0f}% (drr) below fcfs, but the run ranges overlap "
+                        f"(fcfs {rng(tf)}, rr {rng(trr)}, drr {rng(tdr)}), so the size of the cost is uncertain even "
+                        f"though its direction is consistent.")
+    if disjoint(across(D, "fcfs_st1", lambda m: m["throughput"]), across(D, "rr_st1", lambda m: m["throughput"])):
+        thr_st1_text = f"With one server thread the throughputs differ ({thr['fcfs_st1']:.0f} fcfs vs {thr['rr_st1']:.0f} rr)."
+    else:
+        thr_st1_text = (f"With one server thread the throughputs ({thr['fcfs_st1']:.0f} fcfs vs {thr['rr_st1']:.0f} rr) "
+                        f"are not separable: the single worker is the bottleneck either way.")
+
+    lg_rr = across(D, "rr_ref", lambda m: m["by_class"]["large"]["slow_med"])
+    lg_dr = across(D, "drr_ref", lambda m: m["by_class"]["large"]["slow_med"])
+    lg_rr1 = across(D, "rr_st1", lambda m: m["by_class"]["large"]["slow_med"])
+    lg_dr1 = across(D, "drr_st1", lambda m: m["by_class"]["large"]["slow_med"])
+    if disjoint(lg_rr1, lg_dr1) and lg_dr1["median"] > lg_rr1["median"]:
+        lg_text = (f"With one thread drr's large file is {100 * (lg_dr1['median'] / lg_rr1['median'] - 1):.0f}% slower in "
+                   f"every run: it needs {rounds_drr:.0f} rounds against rr's {rounds_rr:.0f}, and each extra round is a trip "
+                   f"to the back of a longer queue.")
+    elif disjoint(lg_rr1, lg_dr1):
+        lg_text = "With one thread the two differ, drr being faster."
+    else:
+        lg_text = "With one thread the two are not separable."
     story = []
     story.append(P("COL724/7524 Assignment 2, Part A: Link Scheduling", TITLE))
     story.append(P(f"{AUTHORS}", SMALL))
@@ -263,13 +303,15 @@ def build_pdf():
     story.append(P("1. The four policies as implemented", H1))
     story.append(P(
         "<b>Queue and threads (A5).</b> An acceptor thread only calls accept(). Each connection goes to a short-lived "
-        "admission thread that reads the header line (5 s receive timeout), answers HEALTH immediately with the current "
+        "admission thread that reads the header line under a 5 s total deadline, answers HEALTH immediately with the current "
         "queue depth, validates the file name (A25), and enqueues the request. For a GET it opens the file and takes the "
         "size from fstat, so the size is known, and fixed to one version of the file, when the request enters the queue. "
         "<i>server_threads</i> workers only loop on <i>next()</i>, then serve_slice() for one round, then either requeue "
         "the request (PREEMPTED) or finish it. Because admission never waits for a worker, requests really do pile up in "
         "the scheduler queue: a test that pins the only worker on a stalled PUT sees HEALTH report a depth of 6, and HEALTH "
-        "still answers in about 1 ms while a silent client is connected."))
+        "still answers in about 1 ms while a silent client is connected. Clients that trickle bytes are cut off by total "
+        "deadlines (5 s for the header, 10 s per 64 KB of a PUT body), not by a per-recv() timeout, so they cannot pin an "
+        "admission thread or a worker either."))
     story.append(P(
         "<b>Policies.</b> <b>fcfs</b> serves in arrival order. <b>sjf</b> serves the queued request with the smallest declared "
         "byte count (file size for GET, the count in the request line for PUT: one key for both verbs), earliest arrival "
@@ -327,19 +369,24 @@ def build_pdf():
         f"required cells) and are marked as such."))
 
     # ---------------------------------------------------------------- 3
-    story.append(P("3. Per-run results", H1))
-    rows = [["cell", "server thr.", "waiting p50 (us)", "waiting p99 (us)", "throughput (req/s)"]]
+    h3 = P("3. Per-run results", H1)
+    rows = [["cell", "waiting p50 (us)", "waiting p99 (us)", "response p50 (us)", "response p99 (us)",
+             "throughput (req/s)"]]
     for c in ALL_CELLS:
         if not any(c in r["cells"] for r in D["runs"]):
             continue
         tag = " (suppl.)" if c in ("drr_st1", "sjf_st1") else ""
-        rows.append([f"{LABEL[c]}{tag}", "4" if c.endswith("ref") else "1",
+        rows.append([f"{LABEL[c]}, {'4' if c.endswith('ref') else '1'} thr{tag}",
                      rng(across(D, c, lambda m: m["wait_p50_ns"]), 1000),
                      rng(across(D, c, lambda m: m["wait_p99_ns"]), 1000),
+                     rng(across(D, c, lambda m: m["resp_p50_ns"]), 1000),
+                     rng(across(D, c, lambda m: m["resp_p99_ns"]), 1000),
                      rng(across(D, c, lambda m: m["throughput"]))])
     story.append(KeepTogether([
-        P(f"<b>Table 1.</b> Waiting time (start - arrival) and throughput, median [min-max] over {K} runs.", SMALL),
-        table(rows, [1.15 * inch, 0.8 * inch, 1.7 * inch, 1.85 * inch, 1.75 * inch]),
+        h3,
+        P(f"<b>Table 1.</b> Waiting time (start - arrival), response time (finish - arrival) and throughput, "
+          f"median [min-max] over {K} runs.", SMALL),
+        table(rows, [1.15 * inch, 1.27 * inch, 1.3 * inch, 1.27 * inch, 1.3 * inch, 1.05 * inch]),
     ]))
     story.append(Spacer(1, 3))
     story.append(fig_img("fig1_waiting_throughput.png"))
@@ -375,12 +422,22 @@ def build_pdf():
         f"under fcfs against {f_large('rr_st1'):.0f} under rr. Medium files barely move at the reference configuration "
         f"and gain under one thread. Throughput is lower under rr/drr (median {thr['rr_ref']:.0f} / {thr['drr_ref']:.0f} "
         f"req/s vs {thr['fcfs_ref']:.0f} for fcfs at the reference configuration): every extra round costs a queue "
-        f"trip and extra system calls. That gap is comparable to the run-to-run spread ({rng(across(D, 'fcfs_ref', lambda m: m['throughput']))} "
-        f"for fcfs), so I treat it as a small cost rather than a firm ranking; with one server thread the throughputs "
-        f"({thr['fcfs_st1']:.0f} vs {thr['rr_st1']:.0f}) are not separable."))
+        f"trip and extra system calls. " + thr_ref_text + " " + thr_st1_text))
+
+    story.append(P(
+        f"<b>Waiting versus response (A19).</b> The two tell different stories. At the reference configuration rr / drr "
+        f"cut median waiting {w50['fcfs_ref'] / w50['rr_ref']:.1f}x, yet median response is "
+        f"{'not lower' if min(r50['rr_ref'], r50['drr_ref']) >= r50['fcfs_ref'] else 'only slightly lower'}: "
+        f"{r50['rr_ref']:.0f} / {r50['drr_ref']:.0f} us against {r50['fcfs_ref']:.0f} us for fcfs. Response also contains the request's own service time, and a preempted request's service is spread "
+        f"over several rounds interleaved with other requests, so the earlier start is spent on the way to the finish. "
+        f"With one server thread the queue is long enough for the gain to survive: median response falls from "
+        f"{r50['fcfs_st1'] / 1000:.1f} ms (fcfs) to {r50['rr_st1'] / 1000:.1f} ms (rr) and {r50['sjf_st1'] / 1000:.1f} ms "
+        f"(sjf), but the tail {'moves the other way' if r99['rr_st1'] > r99['fcfs_st1'] else 'does not follow'}: p99 response {r99['fcfs_st1'] / 1000:.0f} ms (fcfs), "
+        f"{r99['rr_st1'] / 1000:.0f} ms (rr), {r99['sjf_st1'] / 1000:.0f} ms (sjf), because the large requests now wait "
+        f"through many rounds or behind every smaller request. Response time alone would have hidden the first effect."))
 
     # ---------------------------------------------------------------- 4
-    story.append(P("4. rr versus drr (A29)", H1))
+    h4 = P("4. rr versus drr (A29)", H1)
     rows = [["", "forfeited bytes (all requests of a run)", "", "", "rounds / GET", "", "A14 fires", "large.txt slowdown"],
             ["cell", "small", "medium", "large", "medium", "large", "per run", "median / p99"]]
     for c in ("rr_ref", "drr_ref", "rr_st1", "drr_st1"):
@@ -395,6 +452,7 @@ def build_pdf():
     t = table(rows, [1.45 * inch, 0.6 * inch, 0.75 * inch, 0.85 * inch, 0.65 * inch, 0.55 * inch, 0.7 * inch, 1.3 * inch], header_rows=2)
     t.setStyle(TableStyle([("SPAN", (1, 0), (3, 0)), ("SPAN", (4, 0), (5, 0))]))
     story.append(KeepTogether([
+        h4,
         P(f"<b>Table 3.</b> Long-line comparison, median over {K} runs. A14 fired {a14_rr:.0f} times per rr run at the "
           f"reference configuration and {a14_rr1:.0f} at one thread (range {a14_lo:.0f}-{a14_hi:.0f} over all runs): "
           f"exactly the 6 long lines of every large-file GET (about {n_get_large:.0f} GETs per run) and never under drr.", SMALL),
@@ -419,13 +477,16 @@ def build_pdf():
         f"each long line transfer nothing. What drr buys is exact, predictable accounting; what it costs is more "
         f"rounds (and queue trips) for the long-line file."))
     story.append(P(
-        f"<b>Effect on response time.</b> Here the two are not separable: the large file's median slowdown is "
-        f"{slow('rr_ref', 'large'):.0f} (rr) and {slow('drr_ref', 'large'):.0f} (drr) ns/byte at the reference "
-        f"configuration and {slow('rr_st1', 'large'):.0f} vs {slow('drr_st1', 'large'):.0f} with one thread, with the "
-        f"run-to-run ranges overlapping (fig. 3c). The reason is load: with 8 closed-loop clients there are never more "
-        f"than 4 requests waiting at the reference configuration (7 with one thread), so an extra round, or a "
-        f"zero-progress deficit round, is immediately followed by another turn. The mechanism differences above are "
-        f"large and deterministic; their effect on latency would need a longer queue than this workload produces."))
+        f"<b>Effect on response time.</b> The mechanism differences above are large and deterministic; their effect on "
+        f"the large file's response time is small. Its median slowdown is {slow('rr_ref', 'large'):.0f} (rr) and "
+        f"{slow('drr_ref', 'large'):.0f} (drr) ns/byte at the reference configuration, "
+        f"{'with overlapping run-to-run ranges' if not disjoint(lg_rr, lg_dr) else 'in non-overlapping run-to-run ranges'} "
+        f"({rng(lg_rr)} vs {rng(lg_dr)}), and {slow('rr_st1', 'large'):.0f} (rr) vs {slow('drr_st1', 'large'):.0f} (drr) with "
+        f"one thread ({rng(lg_rr1)} vs {rng(lg_dr1)}; fig. 3c). "
+        + lg_text +
+        f" The reason the effect is small is load: with 8 closed-loop clients at most 4 requests wait at the reference "
+        f"configuration (7 with one thread), so an extra round, or a zero-progress deficit round, is soon followed by "
+        f"another turn."))
 
     # ---------------------------------------------------------------- 5
     story.append(P("5. Trade-offs and the SJF starvation", H1))
@@ -440,9 +501,9 @@ def build_pdf():
         f"in every configuration ({f_small('fcfs_st1'):.0f} ns/byte at one thread). <b>sjf</b> reverses this: with one "
         f"thread it gives the best small and medium slowdown ({f_small('sjf_st1'):.0f} and "
         f"{slow('sjf_st1', 'medium'):.0f} ns/byte, against {f_small('rr_st1'):.0f} and {slow('rr_st1', 'medium'):.0f} for rr) "
-        f"and pushes the cost onto the <i>large</i> class ({slow('sjf_st1', 'large'):.0f} ns/byte, about as much as rr / drr "
+        f"and pushes the cost onto the <i>large</i> class ({slow('sjf_st1', 'large'):.0f} ns/byte, at or above rr / drr "
         f"at {slow('rr_st1', 'large'):.0f} / {slow('drr_st1', 'large'):.0f} and about {slow('sjf_st1', 'large') / slow('fcfs_st1', 'large'):.1f}x "
-        f"fcfs). At the reference configuration rr / drr already match sjf for small files "
+        f"fcfs). At the reference configuration rr / drr already match or beat sjf for small files "
         f"({f_small('rr_ref'):.0f} / {f_small('drr_ref'):.0f} vs {f_small('sjf_ref'):.0f}). <b>rr and drr</b> get a similar "
         f"small-file gain without ever ranking requests by size: they cut small-file slowdown by about "
         f"{f_small('fcfs_st1') / f_small('rr_st1'):.0f}x at one thread while charging the large class about "
@@ -464,8 +525,8 @@ def build_pdf():
     story.append(P(
         f"<b>--p</b> changes system calls, not scheduling. fcfs at the reference configuration with --p 1 vs --p 10 "
         f"(3 alternating pairs): send() calls fell from about {sc1:,.0f} to {sc10:,.0f} per run "
-        f"({sc1 / sc10:.1f}x fewer) and median waiting fell from {wait1:.0f} to {wait10:.0f} us (lower in every pair). "
-        f"Throughput was too noisy to rank (medians {thr1:.0f} vs {thr10:.0f} req/s, single runs "
+        f"({sc1 / sc10:.1f}x fewer, in every pair). Median waiting was {wait1:.0f} us with --p 1 and {wait10:.0f} us with "
+        f"--p 10 ({wait_txt}). Throughput was too noisy to rank (medians {thr1:.0f} vs {thr10:.0f} req/s, single runs "
         f"{min(m['throughput'] for m in p1 + p10):.0f}-{max(m['throughput'] for m in p1 + p10):.0f}). The scheduling columns "
         f"are unaffected (rounds = 1, forfeited_bytes = 0 in both). "
         f"<b>Caveats.</b> One machine, loopback, three workload files and a closed loop of 8 clients: the queue is "

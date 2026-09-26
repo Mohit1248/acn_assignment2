@@ -41,31 +41,35 @@ under the name it was requested by.
 | Flag | Meaning |
 |---|---|
 | `--sched <policy>` | required: `fcfs`, `sjf`, `rr` or `drr` |
-| `--quantum <Q>` | bytes per round; required with `rr`/`drr`, rejected otherwise |
-| `--file <path>` | required: directory the server serves files from and stores PUTs into |
+| `--quantum <Q>` | bytes per round, a positive integer; required with `rr`/`drr`, rejected otherwise |
+| `--file <path>` | required: an existing directory the server serves files from and stores PUTs into |
 | `--p <N>` | whole lines grouped into one write on the GET path (positive integer, default 1) |
 | `--config <path>` | config file (default `config.json`) |
 | `--metrics-out <path>` | per-request CSV written at shutdown (default `metrics.csv`) |
 
-A missing required flag, an unknown flag, `--quantum` with `fcfs`/`sjf`, a
-non-positive `--p`, or a bad config all print one clear line and exit non-zero.
+A missing required flag, an unknown flag, `--quantum` with `fcfs`/`sjf` (or `--quantum 0`), a
+non-positive `--p`, a `--file` that is not an existing directory, or a bad config all print
+one clear line and exit non-zero.
 
 ### Client flags
 
 `--config <path>` (default `config.json`), and `--requests <N>`, required by
-`load` and rejected by `put`/`get`.
+`load` and rejected by `put`/`get`. `put`/`get` exit non-zero on failure; `load` exits
+non-zero if the workload directory is unusable or any request failed (it prints no
+metrics, A4).
 
 ### config.json
 
 | Field | Meaning |
 |---|---|
-| `server.ip`, `server.port` | address the server listens on / the client connects to |
-| `server.server_threads` | number of worker threads that serve requests |
-| `server.client_threads` | concurrent client threads used by `client load` |
+| `server.ip`, `server.port` | address the server listens on / the client connects to (port 1-65535) |
+| `server.server_threads` | number of worker threads that serve requests (1-10000) |
+| `server.client_threads` | concurrent client threads used by `client load` (1-10000) |
 | `load_balancer.*` | used by Part B only (validated when present, ignored here) |
 
-Every field is required. A missing field, a field of the wrong type or
-malformed JSON exits non-zero naming the field, e.g.
+Every field is required. A missing field, a field of the wrong type, a value out of
+range (a thread count of 0 would start a server that never serves) or malformed JSON
+exits non-zero naming the field, e.g.
 `error: missing required field 'server.port'`. The committed `config.json` is
 the reference configuration of the experiments: 4 server threads, 8 client
 threads.
@@ -95,7 +99,7 @@ size.
 
 * One **acceptor** thread only calls `accept()`.
 * Each connection goes to a short-lived **admission** thread: it reads the
-  header line (5 s receive timeout, so a silent client pins nothing), answers
+  header line (under a 5 s *total* deadline, so neither a silent nor a trickling client pins anything), answers
   `HEALTH` immediately, validates the file name, and enqueues the request. For
   a GET it opens the file and takes the size from `fstat`, so the size is known
   when the request enters the queue and refers to one fixed version of the file.
@@ -153,7 +157,9 @@ of slices under rr/drr; `forfeited_bytes` is non-zero only for rr GETs.
 
 * **A14 reading** as above (fires only when the long line starts a round); the
   report explains why, and what the alternative would change.
-* **Robustness:** `MSG_NOSIGNAL` and `SIGPIPE` ignored (a client hanging up
+* **Robustness:** the header must arrive within 5 s in total and each 64 KB of a PUT body within 10 s in
+  total (a per-`recv()` timeout alone would let a client sending one byte every few seconds hold a thread
+  for hours); `MSG_NOSIGNAL` and `SIGPIPE` ignored (a client hanging up
   must not kill the server); a PUT declaring more than 1 GiB is rejected with
   `ERR`; an exception while serving one request is caught and answered with
   `ERR`; `TCP_NODELAY` (each `--p` group is really one segment) and a send
@@ -179,7 +185,7 @@ of slices under rr/drr; `forfeited_bytes` is non-zero only for rr GETs.
 
 ```
 make test                        # 72 unit checks on serve_slice and the four queue policies
-SCHED=rr tests/integration_test.sh   # end-to-end; SCHED = fcfs | sjf | rr | drr (default fcfs)
+SCHED=rr tests/integration_test.sh   # ~40 end-to-end checks; SCHED = fcfs | sjf | rr | drr (default fcfs)
 ```
 
 The unit tests (`tests/test_slice.cpp`) drive `serve_slice` over a message-
@@ -187,7 +193,10 @@ preserving socketpair and compare rounds, forfeited bytes, A14 counts, write
 grouping and PUT resumption against values worked out by hand. The integration
 suite covers byte-exact transfer, `HEALTH` behind a silent client, surviving
 client hang-ups, queue build-up, the SIGTERM race, absurd PUT sizes, torn-read
-freedom under concurrent PUT+GET, `--p` validation, and that each policy orders
+freedom under concurrent PUT+GET, a PUT whose body shares a segment with its header,
+zero-byte files, `HEALTH` absent from the CSV, SIGINT and an immediate restart on the
+same port, byte-exact transfer of every workload file under every `--p` with a small
+quantum, clients that trickle bytes, bad configs and flags, and that each policy orders
 a queued large and small GET the way it should. `tests/test_*.py` are manual
 raw-socket scripts (start a server on port 9000 first).
 

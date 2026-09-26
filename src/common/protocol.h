@@ -25,14 +25,18 @@ struct HeaderReadResult {
 
 // Reads one '\n'-delimited line from fd. `timeout_ms` bounds the whole read
 // (A5: a client that connects and sends nothing must not block admission or
-// pin a worker indefinitely) - implement with SO_RCVTIMEO or poll()/select().
+// pin a worker indefinitely). The deadline covers the whole line, so a peer
+// dribbling one byte at a time is cut off too.
 HeaderReadResult read_header_line(int fd, int timeout_ms);
 
 // Reads exactly `n` bytes from fd into `out`. Drains `leftover` first (bytes
 // already read off the socket but not yet consumed), then recv()s the rest.
 // `leftover` is left empty (or with its unused tail) after the call.
 // Returns false on socket error or peer closing before `n` bytes arrive.
-bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n);
+//
+// total_timeout_ms >= 0 bounds the whole call (not each recv), so a peer that
+// trickles bytes cannot pin the caller; -1 keeps the socket's own timeout.
+bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n, int total_timeout_ms = -1);
 
 // Sends exactly `n` bytes, looping over short send()s. Returns false only on
 // a real send error. This is the raw primitive with no line-boundary or

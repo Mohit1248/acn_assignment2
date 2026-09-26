@@ -71,8 +71,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (op == "load") {
-        run_load(cfg.server.ip, cfg.server.port, target, requests, cfg.server.client_threads);
-        return 0;
+        return run_load(cfg.server.ip, cfg.server.port, target, requests, cfg.server.client_threads) ? 0 : 1;
     }
 
     usage_error("unknown operation '" + op + "' (expected put, get, or load)");

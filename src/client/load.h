@@ -13,8 +13,10 @@
 //      name or PUTs it again. Closed-loop: each thread waits for the full
 //      response before issuing its next request.
 //   3. Report nothing itself - all metrics come from the server's CSV
-//      (A23); this function's job is purely to generate the load.
-void run_load(const std::string& server_ip, uint16_t server_port, const std::string& workload_dir,
+//      (A23); this function's job is purely to generate the load. Returns
+//      false if the workload directory is unusable or any request failed, so
+//      the client can exit non-zero.
+bool run_load(const std::string& server_ip, uint16_t server_port, const std::string& workload_dir,
               uint64_t n_requests, int client_threads);
 
 #endif  // CLIENT_LOAD_H

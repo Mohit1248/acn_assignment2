@@ -50,23 +50,33 @@ uint16_t require_port(const json& obj, const char* key, const char* path) {
     const json& v = obj.at(key);
     if (!v.is_number_integer()) fail_type(path);
     long long n = v.get<long long>();
-    if (n < 0 || n > 65535) fail_custom(path, "port out of range");
+    if (n < 1 || n > 65535) fail_custom(path, "port must be between 1 and 65535");  // 0 = "any port": unusable here
     return static_cast<uint16_t>(n);
 }
 
-int require_int(const json& obj, const char* key, const char* path) {
+// An integer that must lie in [lo, hi]. A thread count of 0 or -2, for example,
+// would otherwise start a server with no workers that silently never serves.
+int require_int(const json& obj, const char* key, const char* path, long long lo, long long hi) {
     if (!obj.contains(key)) fail_missing(path);
     const json& v = obj.at(key);
     if (!v.is_number_integer()) fail_type(path);
-    return v.get<int>();
+    long long n = v.get<long long>();
+    if (n < lo || n > hi) {
+        fail_custom(path, "value must be between " + std::to_string(lo) + " and " + std::to_string(hi));
+    }
+    return static_cast<int>(n);
 }
+
+constexpr long long kMaxThreads = 10000;
+constexpr long long kMaxIntervalMs = 3600000;
 
 }  // namespace
 
 Config load_config(const std::string& path, bool require_load_balancer) {
     std::ifstream in(path);
     if (!in) {
-        fail_json("cannot open '" + path + "'");
+        std::cerr << "error: cannot open config file '" << path << "'\n";
+        std::exit(1);
     }
     std::stringstream ss;
     ss << in.rdbuf();
@@ -85,15 +95,15 @@ Config load_config(const std::string& path, bool require_load_balancer) {
     const json& server = require_obj(root, "server", "server");
     cfg.server.ip = require_string(server, "ip", "server.ip");
     cfg.server.port = require_port(server, "port", "server.port");
-    cfg.server.server_threads = require_int(server, "server_threads", "server.server_threads");
-    cfg.server.client_threads = require_int(server, "client_threads", "server.client_threads");
+    cfg.server.server_threads = require_int(server, "server_threads", "server.server_threads", 1, kMaxThreads);
+    cfg.server.client_threads = require_int(server, "client_threads", "server.client_threads", 1, kMaxThreads);
 
     if (require_load_balancer) {
         const json& lb = require_obj(root, "load_balancer", "load_balancer");
         cfg.load_balancer.ip = require_string(lb, "ip", "load_balancer.ip");
         cfg.load_balancer.port = require_port(lb, "port", "load_balancer.port");
         cfg.load_balancer.health_interval_ms =
-            require_int(lb, "health_interval_ms", "load_balancer.health_interval_ms");
+            require_int(lb, "health_interval_ms", "load_balancer.health_interval_ms", 1, kMaxIntervalMs);
 
         if (!lb.contains("backends")) fail_missing("load_balancer.backends");
         const json& backends = lb.at("backends");
