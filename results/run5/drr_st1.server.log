@@ -1,2 +1,2 @@
 server: CLI parsed OK (sched=drr, quantum=8192, file=results/run5/drr_st1.data, p=1, config=results/run5/drr_st1.config.json, metrics-out=results/run5/drr_st1.csv). Listening on 127.0.0.1:9106 with 1 worker thread(s).
-server: shutting down. requests_served=1003 bytes_served=62709600 send_calls=160519
+server: shutting down. requests_served=1003 bytes_served=64383940 send_calls=168865

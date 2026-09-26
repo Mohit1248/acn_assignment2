@@ -1,2 +1,2 @@
 server: CLI parsed OK (sched=fcfs, quantum=n/a, file=results/run1/fcfs_st1.data, p=1, config=results/run1/fcfs_st1.config.json, metrics-out=results/run1/fcfs_st1.csv). Listening on 127.0.0.1:9104 with 1 worker thread(s).
-server: shutting down. requests_served=1003 bytes_served=63706366 send_calls=156811
+server: shutting down. requests_served=1003 bytes_served=63226767 send_calls=155772
