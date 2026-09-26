@@ -1,6 +1,8 @@
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <netinet/tcp.h>
 #include <netinet/in.h>
 #include <unistd.h>
 
@@ -20,7 +22,7 @@
 #include "../common/csv_writer.h"
 #include "../common/protocol.h"
 #include "scheduler.h"
-#include "stub_scheduler.h"
+
 
 // CLI parsing + validation (A1) - Stage 1, S1, DONE (Phase 0).
 // Accept loop / worker pool / signal-driven shutdown - S2/S3/S4/S6/S7/S8/S9,
@@ -171,6 +173,17 @@ void send_err_and_close(int fd, const std::string& reason) {
 void admit_connection(int fd, IScheduler* sched, const Args& args) {
     AdmissionGuard guard;  // counted in g_active_admissions by the acceptor
 
+    // TCP_NODELAY: --p is about how many lines go into one write(), so every
+    // write must actually go out as its own segment instead of being held back
+    // by Nagle's algorithm (which also injects ~40 ms stalls on small writes).
+    // SO_SNDTIMEO: a peer that stops reading must fail a send after a while
+    // instead of pinning a worker forever.
+    int one = 1;
+    setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
+    struct timeval snd_timeout{};
+    snd_timeout.tv_sec = 10;
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_timeout, sizeof(snd_timeout));
+
     // S3: bounded header read so a silent client can't pin a worker.
     HeaderReadResult hdr = read_header_line(fd, kHeaderTimeoutMs);
     if (!hdr.ok) {
@@ -209,18 +222,27 @@ void admit_connection(int fd, IScheduler* sched, const Args& args) {
     req->id = g_next_id.fetch_add(1);
     req->client_fd = fd;
     req->filename = parsed.filename;
+    req->path = full_path;
     req->leftover = std::move(hdr.leftover);
     req->arrival_ns = now_monotonic_ns();
 
     if (parsed.type == ReqType::GET) {
         req->op = Request::Op::GET;
+        // Pin the file now. The size declared to the scheduler (SJF's key) and
+        // every later round come from this one descriptor, so a PUT that
+        // renames a new version over the name meanwhile cannot change what
+        // this GET serves, and the size the client receives is the size of
+        // the version it gets (A7).
+        int ffd = ::open(full_path.c_str(), O_RDONLY);
         struct stat st{};
-        if (::stat(full_path.c_str(), &st) != 0) {
+        if (ffd < 0 || ::fstat(ffd, &st) != 0 || !S_ISREG(st.st_mode)) {
+            if (ffd >= 0) ::close(ffd);
             send_err_and_close(fd, "file not found");
             delete req;
             return;
         }
-        req->bytes = static_cast<uint64_t>(st.st_size);  // declared size, per request.h
+        req->file_fd = ffd;
+        req->bytes = static_cast<uint64_t>(st.st_size);
     } else {
         req->op = Request::Op::PUT;
         req->bytes = parsed.byte_count;
@@ -257,35 +279,38 @@ void acceptor_loop(int listen_fd, IScheduler* sched, const Args& args) {
 // touches accept() or header parsing. This is what actually satisfies A5:
 // serving order is decided by whichever policy is active, not by who
 // happened to accept a connection.
-void server_worker_loop(IScheduler* sched, CsvWriter& csv, const Args& args) {
+void server_worker_loop(IScheduler* sched, CsvWriter& csv, const SliceParams& sp) {
     while (true) {
-        Request* to_serve = sched->next();  // blocks until available or shutdown
-        if (!to_serve) return;              // shutdown drained the queue
+        Request* r = sched->next();  // blocks until available or shutdown
+        if (!r) return;              // shutdown drained the queue
 
-        to_serve->rounds = 1;  // A23 (Stage-1 stub only, see TODO in Stage 2)
-
-        std::string served_path = args.file_dir + "/" + to_serve->filename;
-        bool ok = false;
+        SliceResult res = SliceResult::FAILED;
         try {
-            ok = stub_serve_whole(to_serve, to_serve->client_fd, served_path);
+            res = serve_slice(r, r->client_fd, sp);  // one round (K1/K2)
         } catch (const std::exception&) {
             // One bad request (e.g. bad_alloc) must not take down the worker
             // or the server; tell the client instead of closing silently (A24).
-            send_all(to_serve->client_fd, format_err("internal error").data(),
-                     format_err("internal error").size());
+            std::string e = format_err("internal error");
+            send_all(r->client_fd, e.data(), e.size());
         }
-        to_serve->finish_ns = now_monotonic_ns();
 
-        if (ok) {
-            csv.write_row(*to_serve);  // S7 - never called for HEALTH
+        if (res == SliceResult::PREEMPTED) {
+            sched->requeue(r);  // rr/drr: back to the tail, all state kept in *r (A17)
+            continue;
+        }
+
+        r->finish_ns = now_monotonic_ns();
+        if (res == SliceResult::DONE) {
+            csv.write_row(*r);  // S7 - never called for HEALTH
             g_requests_served.fetch_add(1);
-            g_bytes_served.fetch_add(to_serve->bytes);
+            g_bytes_served.fetch_add(r->bytes);
         }
-        // On failure stub_serve_whole has already replied ERR where it can
-        // (missing file, unwritable destination); a dead connection needs no reply.
+        // FAILED: serve_slice already replied ERR where a reply was possible
+        // (unwritable destination, short body); a dead connection needs none.
 
-        close(to_serve->client_fd);
-        delete to_serve;
+        release_request(r);
+        close(r->client_fd);
+        delete r;
     }
 }
 
@@ -297,9 +322,12 @@ int main(int argc, char** argv) {
 
     CsvWriter csv(args.metrics_out);
 
-    // TODO(K4, Stage 2): swap for make_scheduler(args.sched) once sjf/rr/drr
-    // are real; the stub is FIFO/whole-file only and does not satisfy A5/A6.
-    IScheduler* sched = make_stub_scheduler();
+    IScheduler* sched = make_scheduler(args.sched);
+
+    SliceParams slice_params;
+    slice_params.policy = parse_policy(args.sched);
+    slice_params.quantum = args.quantum;  // only rr / drr use it (A1 rejects it otherwise)
+    slice_params.p_lines = args.p_lines;
 
     std::signal(SIGINT, on_signal);
     std::signal(SIGTERM, on_signal);
@@ -321,7 +349,7 @@ int main(int argc, char** argv) {
     std::vector<std::thread> workers;
     workers.reserve(static_cast<size_t>(cfg.server.server_threads));
     for (int i = 0; i < cfg.server.server_threads; ++i) {
-        workers.emplace_back(server_worker_loop, sched, std::ref(csv), std::cref(args));
+        workers.emplace_back(server_worker_loop, sched, std::ref(csv), std::cref(slice_params));
     }
 
     while (!g_shutdown.load()) {

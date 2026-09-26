@@ -7,76 +7,91 @@
 
 #include "../common/request.h"
 
-// The plug-in point between server infrastructure (accept loop / worker
-// threads, Stage 1) and the scheduler core (Stage 2, K1-K4). One instance
-// per running server process, selected by --sched at startup. Locked in
-// Phase 0; see assignment2-team-plan-v2.md.
+// The plug-in point between the server infrastructure (acceptor / admission /
+// worker threads, main.cpp) and the scheduling core (this header, slice.cpp,
+// scheduler_*.cpp). One IScheduler per server process, chosen by --sched.
+//
+// Division of labour:
+//   * IScheduler decides WHICH request is served next (the queue order).
+//   * serve_slice() decides HOW MUCH of that request is transferred this time
+//     (one round) and keeps the request's transfer state so it can resume.
 //
 // Thread-safety: enqueue()/next()/requeue()/queue_depth() are called
-// concurrently by the accept thread and up to `server_threads` workers, and
-// must be internally synchronized by each implementation. serve_slice()
-// (below) runs on whichever single worker currently holds that Request.
+// concurrently by admission threads and up to `server_threads` workers and
+// are internally synchronized. serve_slice() runs on whichever single worker
+// currently holds that Request; nobody else touches it meanwhile.
 class IScheduler {
 public:
     virtual ~IScheduler() = default;
 
-    // Admits a newly-arrived request (header already parsed, byte count
-    // known - A5). The scheduler holds a pointer only while the request is
-    // in the queue; Request lifetime is owned by the caller.
+    // Admits a newly-arrived request (header parsed, size known - A5). The
+    // scheduler only holds the pointer while the request sits in the queue.
     virtual void enqueue(Request* req) = 0;
 
-    // Blocks until a request is available, or returns nullptr once
-    // shutdown() has been called and the queue has drained. Implementations
-    // set req->start_ns the first time a given request is returned (A18:
-    // "start" = first pick-up by a worker, not each re-pick-up after a
-    // requeue).
+    // Blocks until a request is available, or returns nullptr once shutdown()
+    // has been called and the queue has drained. Sets req->start_ns the first
+    // time a request is returned (A18: "start" = first pick-up, not each
+    // re-pick-up after a requeue).
     virtual Request* next() = 0;
 
-    // Returns a preempted request to the queue per the policy's ordering
-    // rule. Only called under rr/drr (A12/A15) - fcfs/sjf never preempt
-    // (A10/A11), so a conforming implementation of either may leave this
-    // unreachable in practice, but must still implement it correctly since
-    // K4 wires all four through the same interface.
+    // Puts a preempted request back per the policy's rule (tail of the queue
+    // for rr/drr, A12). fcfs/sjf never preempt, so never call it.
     virtual void requeue(Request* req) = 0;
 
-    // Number of admitted-but-unserved requests right now, including ones
-    // currently preempted and requeued. Answers HEALTH (B8). Must be cheap
-    // and must not block behind the scheduler's own serving work.
+    // Admitted-but-unserved requests right now, including preempted ones that
+    // were requeued (B8). Cheap; does not wait on serving work.
     virtual size_t queue_depth() const = 0;
 
-    // Stops the queue: next() returns nullptr once drained, so blocked
-    // workers can exit for graceful shutdown (A26).
+    // next() returns nullptr once the queue has drained, so workers can exit
+    // (A26). Requeues are still accepted afterwards so in-flight rr/drr
+    // requests finish.
     virtual void shutdown() = 0;
 };
 
-enum class SliceResult { DONE, PREEMPTED };
+enum class Policy { FCFS, SJF, RR, DRR };
 
-// Serves up to one quantum of `req` on `fd`. Implementation owner: Stage 2,
-// K1 (see slice.cpp).
-//   - fcfs/sjf pass quantum_bytes = req's entire remaining size, so this
-//     always returns DONE - there is no preemption under these policies
-//     (A10/A11).
-//   - rr/drr bound the round to quantum_bytes. GET obeys the whole-line rule
-//     (A6: a round must never end mid-line) and --p batching (A8, groups up
-//     to `p_lines` whole lines per write without changing which bytes are
-//     sent or their order). PUT is byte-opaque (A9): it takes exactly
-//     quantum_bytes with no rounding and no line scanning.
-// Mutates `req` in place - byte_offset, leftover socket bytes, rounds,
-// forfeited_bytes - so a requeue preserves all preemption state (A17).
-// Returns DONE once req->bytes have been fully transferred, PREEMPTED if the
-// quantum ran out first.
-SliceResult serve_slice(Request* req, int fd, uint64_t quantum_bytes, int p_lines);
+// Parses "fcfs"|"sjf"|"rr"|"drr" (already validated by the CLI, A1).
+Policy parse_policy(const std::string& name);
 
-// Constructs the IScheduler for --sched `policy` ("fcfs"|"sjf"|"rr"|"drr" -
-// already validated by main's CLI parsing, A1). Caller owns the result.
-// TODO(K4, Stage 2, joint): currently always returns the fcfs implementation
-// so the server links and runs end-to-end during Stage 1 against the stub
-// transfer path; wire in sjf/rr/drr here as scheduler_*.cpp land.
+struct SliceParams {
+    Policy policy = Policy::FCFS;
+    uint64_t quantum = 0;  // --quantum, bytes per round; only used by rr / drr
+    int p_lines = 1;       // --p: whole lines grouped into one write (A8)
+};
+
+// Outcome of one round:
+//   DONE      every byte transferred; final response sent; request finished
+//   PREEMPTED round used up; requeue the request, all state kept in `req`
+//   FAILED    I/O error or dead peer; nothing more can be done (release_request)
+enum class SliceResult { DONE, PREEMPTED, FAILED };
+
+// Serves one round of `req` on `fd` (K1/K2, slice.cpp).
+//
+//  fcfs / sjf   unbounded allowance: the whole request in a single round.
+//  rr           allowance = Q bytes (A12).
+//  drr          allowance = deficit + Q; unused allowance is kept in
+//               req->deficit instead of being forfeited (A15).
+//
+//  GET is transferred in whole lines (A6), grouped `p_lines` per write (A8).
+//  A round ends as soon as the next line would exceed the remaining allowance
+//  (A13); under rr a line longer than Q is sent in full and ends the round
+//  (A14, logged); under drr there is no such escape - the deficit grows until
+//  the line fits (A16).
+//  PUT is byte-exact (A9): a round reads min(allowance, remaining) bytes from
+//  the socket and appends them to a temp file; nothing is rounded or forfeited.
+//
+// Increments req->rounds; maintains req->byte_offset, req->leftover,
+// req->deficit, req->forfeited_bytes, req->file_fd (A17).
+SliceResult serve_slice(Request* req, int fd, const SliceParams& params);
+
+// Frees per-request transfer resources (file descriptor, unfinished temp
+// file). Safe to call once for any finished request, whatever the outcome.
+// Does not close the client socket.
+void release_request(Request* req);
+
+// Constructs the scheduler for --sched `policy`. Caller owns the result.
 IScheduler* make_scheduler(const std::string& policy);
 
-// Per-policy constructors, one per scheduler_*.cpp (Stage 2, K3). Prefer
-// make_scheduler() above from calling code; these exist so the factory can
-// be a one-line switch as each policy lands.
 IScheduler* make_scheduler_fcfs();
 IScheduler* make_scheduler_sjf();
 IScheduler* make_scheduler_rr();

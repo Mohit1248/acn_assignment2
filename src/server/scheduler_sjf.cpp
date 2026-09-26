@@ -3,18 +3,24 @@
 
 #include "../common/clock.h"
 
-// TODO(K3, Stage 2): sjf (A11) - the request with the smallest declared
-// byte count (req->bytes: file size for GET, declared count for PUT) is
-// served first. Both verbs share one ordering key. No aging - starvation of
-// large requests is expected and discussed in the report, not prevented.
-// Never preempts (single round per request, like fcfs).
+// sjf (A11): the queued request with the smallest declared byte count is
+// served next - req->bytes, which is the file size for a GET and the count in
+// the request line for a PUT, so both verbs are ordered by the same key. Ties
+// go to the earlier arrival (the queue keeps arrival order). No aging: the
+// starvation of large requests is an expected property of SJF that the report
+// discusses, not something to prevent. Never preempts (one round per request).
 class SchedulerSjf : public IScheduler {
 public:
     void enqueue(Request* req) override { queue_.push(req); }
 
     Request* next() override {
-        // TODO: pick the index of the minimum req->bytes instead of index 0.
-        Request* req = queue_.pop_pick([](const std::vector<Request*>&) { return size_t(0); });
+        Request* req = queue_.pop_pick([](const std::vector<Request*>& items) {
+            size_t best = 0;
+            for (size_t i = 1; i < items.size(); ++i) {
+                if (items[i]->bytes < items[best]->bytes) best = i;  // strict < keeps the earliest tie
+            }
+            return best;
+        });
         if (req && req->start_ns == 0) {
             req->start_ns = now_monotonic_ns();
         }

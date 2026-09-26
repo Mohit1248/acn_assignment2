@@ -12,7 +12,6 @@ SERVER_SRC := src/server/main.cpp \
               src/server/scheduler_rr.cpp \
               src/server/scheduler_drr.cpp \
               src/server/slice.cpp \
-              src/server/stub_scheduler.cpp \
               $(COMMON_SRC_SERVER)
 
 CLIENT_SRC := src/client/main.cpp \
@@ -31,4 +30,16 @@ client: $(CLIENT_SRC)
 	$(CXX) $(CXXFLAGS) -o $@ $(CLIENT_SRC) $(LDFLAGS)
 
 clean:
-	rm -f server client
+	rm -f server client tests/test_slice
+
+# Unit tests for the scheduling core (serve_slice + the four queue policies).
+TEST_SRC := tests/test_slice.cpp src/server/slice.cpp src/server/scheduler_factory.cpp \
+            src/server/scheduler_fcfs.cpp src/server/scheduler_sjf.cpp \
+            src/server/scheduler_rr.cpp src/server/scheduler_drr.cpp src/common/protocol.cpp
+
+tests/test_slice: $(TEST_SRC)
+	$(CXX) $(CXXFLAGS) -o $@ $(TEST_SRC) $(LDFLAGS)
+
+.PHONY: test
+test: tests/test_slice
+	./tests/test_slice

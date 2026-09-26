@@ -3,7 +3,7 @@
 
 #include "../common/clock.h"
 
-// TODO(K3, Stage 2): rr (A12-A14) - --quantum Q bytes per round, FIFO among
+// rr (A12-A14) - --quantum Q bytes per round, FIFO among
 // requests waiting for their next round. A scheduled request is served for
 // at most Q bytes (the whole-line/A14-escape-hatch/forfeiture accounting
 // itself lives in serve_slice, K1/slice.cpp - this class only owns queue

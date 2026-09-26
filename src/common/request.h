@@ -35,6 +35,14 @@ struct Request {
                                            // (PUT: read-ahead body bytes; GET has no socket input to leave over)
 
     int client_fd = -1;                   // connection this request is being served on
+
+    // --- transfer state that must also survive a requeue (A17) ---
+    std::string path;      // full path under --file: the file a GET reads / a PUT installs
+    std::string tmp_path;  // PUT: temp file written so far; rename()d onto `path` when complete
+    int file_fd = -1;      // GET: descriptor opened at admission, so the size declared in the
+                           //      queue and every round read the SAME version of the file (A7);
+                           // PUT: descriptor of tmp_path, opened on the first slice
+    bool started = false;  // first slice done: response header sent / temp file opened
 };
 
 inline const char* op_to_string(Request::Op op) {

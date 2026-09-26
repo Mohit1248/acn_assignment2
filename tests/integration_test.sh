@@ -6,6 +6,11 @@ set -u
 R="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$R"
 W="$(mktemp -d)"
+# Policy under test: SCHED=fcfs|sjf|rr|drr tests/integration_test.sh  (default fcfs)
+SCHED="${SCHED:-fcfs}"
+QARG=""
+[ "$SCHED" = rr ] || [ "$SCHED" = drr ] && QARG="--quantum 8192"
+echo "== policy under test: $SCHED $QARG =="
 FAILS=0
 SP=""
 
@@ -27,7 +32,7 @@ c["server"]["port"] = int(port)
 c["server"]["server_threads"] = int(threads)
 json.dump(c, open("%s/config_%s.json" % (work, port), "w"))
 EOF
-  "$BIN/server" --sched fcfs --file "$W/data" --config "$W/config_$1.json" \
+  "$BIN/server" --sched "$SCHED" $QARG --file "$W/data" --config "$W/config_$1.json" \
       --metrics-out "$3" >"$W/server_$1.log" 2>&1 &
   SP=$!
   sleep 0.6
@@ -146,8 +151,30 @@ EOF
 stop_server
 ROWS=$(( $(wc -l < "$W/f.csv") - 1 ))
 [ "$ROWS" -eq 203 ] && pass "CSV has 203 rows (3 seed + 200)" || fail "CSV has $ROWS rows, expected 203"
-awk -F, 'NR>1 && $5 != 1 {bad=1} END{exit bad}' "$W/f.csv" \
-   && pass "rounds == 1 on every row (fcfs, A23)" || fail "rounds != 1 on some row"
+case "$SCHED" in
+  fcfs|sjf)
+    awk -F, 'NR>1 && $5 != 1 {bad=1} END{exit bad}' "$W/f.csv" \
+       && pass "rounds == 1 on every row ($SCHED never preempts, A23)" || fail "rounds != 1 on some row"
+    awk -F, 'NR>1 && $6 != 0 {bad=1} END{exit bad}' "$W/f.csv" \
+       && pass "forfeited_bytes == 0 on every row" || fail "forfeited_bytes != 0"
+    ;;
+  rr|drr)
+    MAXR=$(awk -F, 'NR>1 && $3=="large.txt" && $2=="GET" && $5>m {m=$5} END{print m+0}' "$W/f.csv")
+    [ "$MAXR" -ge 10 ] && pass "large.txt GET was preempted many times (max rounds $MAXR)" \
+                       || fail "large.txt GET only took $MAXR rounds"
+    awk -F, 'NR>1 && $2=="PUT" && $6 != 0 {bad=1} END{exit bad}' "$W/f.csv" \
+       && pass "forfeited_bytes == 0 on every PUT row (A13)" || fail "a PUT forfeited bytes"
+    FORF=$(awk -F, 'NR>1 {t+=$6} END{print t+0}' "$W/f.csv")
+    A14=$(grep -c "^A14 " "$W/server_19806.log")
+    if [ "$SCHED" = rr ]; then
+      [ "$FORF" -gt 0 ] && pass "rr forfeited $FORF bytes in total" || fail "rr forfeited nothing"
+      [ "$A14" -gt 0 ] && pass "A14 fired $A14 times under rr" || fail "A14 never fired under rr"
+    else
+      [ "$FORF" -eq 0 ] && pass "drr forfeited nothing" || fail "drr forfeited $FORF bytes"
+      [ "$A14" -eq 0 ] && pass "A14 never fires under drr (A16)" || fail "A14 fired $A14 times under drr"
+    fi
+    ;;
+esac
 
 # ---- G. concurrent PUT + GET of the SAME file must never return a torn file (A7) ----
 start_server 19807 4 "$W/g.csv"
@@ -184,6 +211,42 @@ EOF
 set -- $G
 [ "$1" = "0" ] && [ "${2:-0}" -gt 50 ] && pass "0 torn GETs out of $2 during concurrent PUT+GET of one file" \
                                        || fail "$1 torn GETs out of ${2:-?} during concurrent PUT+GET"
+stop_server
+
+# ---- I. with one worker busy, does the policy pick the next request? ----
+# Queue = [GET large.txt (arrived first), GET small.txt]. fcfs serves large
+# first; sjf serves the smaller one first; rr/drr give large only one quantum
+# before small gets its turn, so small finishes first there too.
+start_server 19808 1 "$W/i.csv"
+ORDER=$(python3 - <<'EOF'
+import socket, threading, time
+def hdr(s):
+    b = b""
+    while not b.endswith(b"\n"): b += s.recv(1)
+    return b.decode().split()
+def slow():
+    s = socket.create_connection(("127.0.0.1", 19808)); s.sendall(b"PUT hold.txt 100\n"); hdr(s)
+    time.sleep(2); s.sendall(b"x" * 100); hdr(s); s.close()
+threading.Thread(target=slow, daemon=True).start()
+time.sleep(0.4)                                   # the only worker is now stuck on hold.txt
+done = {}
+def get(name):
+    s = socket.create_connection(("127.0.0.1", 19808)); s.sendall(("GET %s\n" % name).encode())
+    size = int(hdr(s)[1]); got = 0
+    while got < size:
+        c = s.recv(65536)
+        if not c: break
+        got += len(c)
+    done[name] = time.time(); s.close()
+a = threading.Thread(target=get, args=("large.txt",)); a.start(); time.sleep(0.3)
+b = threading.Thread(target=get, args=("small.txt",)); b.start()
+a.join(); b.join()
+print("large_first" if done["large.txt"] < done["small.txt"] else "small_first")
+EOF
+)
+if [ "$SCHED" = fcfs ]; then EXP=large_first; else EXP=small_first; fi
+[ "$ORDER" = "$EXP" ] && pass "$SCHED served $ORDER, as that policy should" \
+                      || fail "$SCHED served $ORDER, expected $EXP"
 stop_server
 
 # ---- H. --p must be a positive integer ----

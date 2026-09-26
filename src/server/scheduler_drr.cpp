@@ -3,7 +3,7 @@
 
 #include "../common/clock.h"
 
-// TODO(K3, Stage 2): drr (A15-A16) - identical queue ordering to rr, but
+// drr (A15-A16) - identical queue ordering to rr, but
 // each request carries a deficit counter (Request::deficit, initialised to
 // 0 - see request.h) instead of forfeiting unused allowance each round. The
 // deficit/allowance math itself lives in serve_slice (K1/slice.cpp); this
