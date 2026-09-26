@@ -1,0 +1,2 @@
+server: CLI parsed OK (sched=sjf, quantum=n/a, file=results/run3/sjf_ref.data, p=1, config=results/run3/sjf_ref.config.json, metrics-out=results/run3/sjf_ref.csv). Listening on 127.0.0.1:9101 with 4 worker thread(s).
+server: shutting down. requests_served=1003 bytes_served=62456084 send_calls=151877
