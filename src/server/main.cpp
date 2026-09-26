@@ -371,7 +371,8 @@ int main(int argc, char** argv) {
     for (auto& t : workers) t.join();
 
     std::cerr << "server: shutting down. requests_served=" << g_requests_served.load()
-              << " bytes_served=" << g_bytes_served.load() << "\n";
+              << " bytes_served=" << g_bytes_served.load()
+              << " send_calls=" << send_call_count() << "\n";
 
     csv.close();
     delete sched;

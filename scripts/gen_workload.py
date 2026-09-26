@@ -75,16 +75,19 @@ def write_large_with_long_lines(path: str, target_bytes: int, seed: int,
 
     with open(path, "w", newline="\n") as f:
         written = 0
+        short_written = 0  # counts ordinary-line bytes only, so the long lines
+                           # themselves do not advance the position of the next one
         long_lines_left = num_long_lines
         next_long_at = gap_bytes
         while written < target_bytes:
-            if long_lines_left > 0 and written >= next_long_at:
+            if long_lines_left > 0 and short_written >= next_long_at:
                 line = make_long_line(rng, long_line_len)
                 long_lines_left -= 1
                 next_long_at += gap_bytes
             else:
                 line_len = rng.randint(60, 79)
                 line = make_short_line(rng, line_len)
+                short_written += len(line)
             f.write(line)
             written += len(line)
 

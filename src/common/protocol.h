@@ -39,6 +39,10 @@ bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n);
 // --p batching behaviour - see scheduler.h / serve_slice for A6/A8.
 bool send_all(int fd, const char* data, size_t n);
 
+// Total number of send() system calls made by send_all() in this process
+// (reported at server shutdown; used to show what --p changes, A30).
+uint64_t send_call_count();
+
 // ---- request line parsing ---------------------------------------------------
 
 enum class ReqType { GET, PUT, HEALTH, MALFORMED };

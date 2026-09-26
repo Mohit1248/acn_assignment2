@@ -1,6 +1,7 @@
 #include "protocol.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cerrno>
 #include <cstdlib>
@@ -221,9 +222,14 @@ bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n) {
     return true;
 }
 
+static std::atomic<uint64_t> g_send_calls{0};
+
+uint64_t send_call_count() { return g_send_calls.load(); }
+
 bool send_all(int fd, const char* data, size_t n) {
     size_t sent = 0;
     while (sent < n) {
+        g_send_calls.fetch_add(1, std::memory_order_relaxed);
         ssize_t s = send(fd, data + sent, n - sent, MSG_NOSIGNAL);
         if (s < 0 && errno == EINTR) continue;  // interrupted by a signal, retry
         if (s <= 0) return false;                // real send error

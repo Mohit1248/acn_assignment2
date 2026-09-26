@@ -16,9 +16,10 @@
 __pycache__/
 *.pyc
 
-# experiment output (regenerate via scripts/run_experiments.py; commit the
-# final CSVs/logs explicitly as deliverables when ready, not implicitly)
-/results/
+# experiment output: the CSVs, logs and configs under results/ are deliverables
+# and ARE tracked; only the server-side copies of the workload are not
+/results/**/*.data/
+/results/**/_warmup/
 
 # editor/OS cruft
 .vscode/

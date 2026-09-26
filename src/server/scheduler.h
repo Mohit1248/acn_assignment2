@@ -74,9 +74,10 @@ enum class SliceResult { DONE, PREEMPTED, FAILED };
 //
 //  GET is transferred in whole lines (A6), grouped `p_lines` per write (A8).
 //  A round ends as soon as the next line would exceed the remaining allowance
-//  (A13); under rr a line longer than Q is sent in full and ends the round
-//  (A14, logged); under drr there is no such escape - the deficit grows until
-//  the line fits (A16).
+//  (A13); under rr a line longer than Q that starts a round is sent in full
+//  and ends the round (A14, logged) - mid-round it is handled by A13, so the
+//  remainder is forfeited first; under drr there is no such escape - the
+//  deficit grows until the line fits (A16).
 //  PUT is byte-exact (A9): a round reads min(allowance, remaining) bytes from
 //  the socket and appends them to a temp file; nothing is rounded or forfeited.
 //

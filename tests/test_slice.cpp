@@ -167,16 +167,21 @@ static void test_drr_deficit(const std::string& dir) {
 }
 
 static void test_a14_rr(const std::string& dir) {
-    std::printf("rr + A14: lines 10,10,20,10 with Q=15\n");
+    std::printf("rr + A14: lines 10,10,20,10 with Q=15 (A14 only when the long line starts a round)\n");
     std::string content = lines(2, 10) + std::string(19, 'x') + "\n" + std::string(9, 'y') + "\n";
     int before = count_a14();
     GetRun g = run_get(dir, content, params(Policy::RR, 15), 42);
     CHECK(g.all_payload() == content, "bytes received == file");
-    CHECK(g.req.rounds == 3, "rounds == 3");
-    CHECK(g.req.forfeited_bytes == 5, "forfeited == 5 (round 1 only; the A14 overrun forfeits nothing)");
+    // r1: line1 (10), line2 doesn't fit in the 5 left        -> forfeit 5
+    // r2: line2 (10), the 20-byte line doesn't fit in 5 left   -> forfeit 5 (A14 needs a FRESH round)
+    // r3: the 20-byte line starts the round, 20 > Q            -> A14, sent whole, overruns
+    // r4: line4 (10)                                            -> done
+    CHECK(g.req.rounds == 4, "rounds == 4");
+    CHECK(g.req.forfeited_bytes == 10, "forfeited == 10 (5 before line 2, 5 before the long line; the A14 overrun forfeits nothing)");
     CHECK(count_a14() - before == 1, "A14 logged exactly once");
-    CHECK(g.payload(0).size() == 10 && g.payload(1).size() == 30 && g.payload(2).size() == 10,
-          "round sizes 10, 30 (10 + overrunning 20-byte line), 10");
+    CHECK(g.payload(0).size() == 10 && g.payload(1).size() == 10 && g.payload(2).size() == 20 &&
+              g.payload(3).size() == 10,
+          "round sizes 10, 10, 20 (the long line alone, via A14), 10");
     for (size_t i = 0; i < g.rounds.size(); ++i) CHECK(ends_on_line_boundary(g.payload(i)), "line boundary");
 }
 

@@ -16,6 +16,7 @@ Usage:
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -35,6 +36,19 @@ RUNS = [
     {"name": "drr_ref", "sched": "drr", "server_threads": REFERENCE_SERVER_THREADS, "quantum": QUANTUM},
     {"name": "fcfs_st1", "sched": "fcfs", "server_threads": SINGLE_SERVER_THREADS},
     {"name": "rr_st1", "sched": "rr", "server_threads": SINGLE_SERVER_THREADS, "quantum": QUANTUM},
+]
+
+# Throwaway run executed once before the measured cells and never recorded: the
+# first cell of a session otherwise pays a cold-start cost (fresh process, cold
+# page cache/CPU) that has nothing to do with the policy being measured.
+WARMUP_RUN = {"name": "warmup", "sched": "fcfs", "server_threads": REFERENCE_SERVER_THREADS}
+WARMUP_REQUESTS = 300
+
+# Supplementary cells (NOT among the six required by A28). They only run when
+# named explicitly, e.g. `--only drr_st1,sjf_st1`; the report labels them as such.
+EXTRA_RUNS = [
+    {"name": "drr_st1", "sched": "drr", "server_threads": SINGLE_SERVER_THREADS, "quantum": QUANTUM},
+    {"name": "sjf_st1", "sched": "sjf", "server_threads": SINGLE_SERVER_THREADS},
 ]
 
 
@@ -66,6 +80,7 @@ def wait_for_health(ip, port, timeout_s):
 
 def run_one(run, index, args, results_dir):
     port = 9100 + index
+    os.makedirs(results_dir, exist_ok=True)
     config_path = os.path.join(results_dir, run["name"] + ".config.json")
     make_config(run["server_threads"], port, config_path)
 
@@ -78,6 +93,8 @@ def run_one(run, index, args, results_dir):
                   "--config", config_path, "--metrics-out", csv_path]
     if "quantum" in run:
         server_cmd += ["--quantum", str(run["quantum"])]
+    if args.p is not None:
+        server_cmd += ["--p", str(args.p)]
 
     print(f"[{run['name']}] starting server: {' '.join(server_cmd)}")
     with open(log_path, "w") as logf:
@@ -121,13 +138,28 @@ def main():
     ap.add_argument("--requests", type=int, default=N_REQUESTS)
     ap.add_argument("--health-timeout", type=float, default=10)
     ap.add_argument("--only", help="comma-separated run names to run (default: all 6)")
+    ap.add_argument("--no-warmup", action="store_true", help="skip the throwaway warm-up run")
+    ap.add_argument("--with-extras", action="store_true",
+                    help="also run the two supplementary cells (drr_st1, sjf_st1)")
+    ap.add_argument("--p", type=int, default=None,
+                    help="pass --p N to the server (A30 aside only; not part of the required cells)")
     args = ap.parse_args()
 
     os.makedirs(args.results_dir, exist_ok=True)
     only = set(args.only.split(",")) if args.only else None
 
+    if not args.no_warmup:
+        print("[warmup] throwaway run, not recorded")
+        warm = argparse.Namespace(**vars(args))
+        warm.requests = WARMUP_REQUESTS
+        warm_dir = os.path.join(args.results_dir, "_warmup")
+        run_one(WARMUP_RUN, 30, warm, warm_dir)
+        shutil.rmtree(warm_dir, ignore_errors=True)
+
     failures = []
-    for i, run in enumerate(RUNS):
+    for i, run in enumerate(RUNS + EXTRA_RUNS):
+        if only is None and run in EXTRA_RUNS and not args.with_extras:
+            continue  # the six required cells only, unless extras are requested
         if only and run["name"] not in only:
             continue
         if not run_one(run, i, args, args.results_dir):

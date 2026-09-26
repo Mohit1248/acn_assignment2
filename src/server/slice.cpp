@@ -111,16 +111,21 @@ SliceResult serve_get(Request* r, int fd, const SliceParams& sp) {
 
     const int p = std::max(1, sp.p_lines);
     Batch batch;
+    uint64_t sent_this_round = 0;  // file bytes already sent in this round
 
     while (r->byte_offset < r->bytes) {
         uint64_t len = line_length_at(r->file_fd, r->byte_offset, r->bytes);
         if (len == 0) return SliceResult::FAILED;
 
         if (bnd) {
-            if (sp.policy == Policy::RR && len > sp.quantum) {
-                // A14: this line can never fit in ANY round, so send it whole
-                // and end the round, overrunning the allowance - otherwise the
-                // request would be requeued having transferred nothing, forever.
+            if (sp.policy == Policy::RR && sent_this_round == 0 && len > sp.quantum) {
+                // A14: this line can never fit in ANY round and this round has
+                // transferred nothing yet, so send it whole and end the round,
+                // overrunning the allowance - otherwise the request would be
+                // requeued having transferred nothing, forever. (If bytes were
+                // already sent this round, the line is instead handled by A13
+                // below: the round ends and the remainder is forfeited; the line
+                // then goes out first thing in the next round via this branch.)
                 if (!batch.flush(fd)) return SliceResult::FAILED;
                 if (!stream_range(r->file_fd, fd, r->byte_offset, len)) return SliceResult::FAILED;
                 r->byte_offset += len;
@@ -146,6 +151,7 @@ SliceResult serve_get(Request* r, int fd, const SliceParams& sp) {
             if (++batch.lines >= p && !batch.flush(fd)) return SliceResult::FAILED;
         }
         r->byte_offset += len;
+        sent_this_round += len;
         if (bnd) left -= len;
     }
 
