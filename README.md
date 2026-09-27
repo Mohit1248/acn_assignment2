@@ -203,24 +203,30 @@ raw-socket scripts (start a server on port 9000 first).
 ## Reproducing the experiments
 
 ```
-scripts/run_all.sh                 # ~2 min: 5 interleaved blocks x 8 cells + the --p aside, then a summary
-python3 scripts/summarize.py       # every number, median [min-max] over the runs
+scripts/run_all.sh                 # ~30 s: the six required cells, one run each, + the --p aside
+python3 scripts/summarize.py       # every number the report uses
 python  scripts/make_report.py     # figures + report_A.pdf (needs matplotlib and reportlab)
 ```
 
 `run_experiments.py` runs the six cells required by A28 (`fcfs`, `sjf`, `rr`,
 `drr` at 4 server threads; `fcfs`, `rr` at 1) with 1000 counted requests each
-and 8 client threads, generating a config per cell; `--with-extras` adds two
-supplementary cells (`drr`, `sjf` at 1 thread). Single cells:
+and 8 client threads, generating a config per cell, once each - A28's default
+("No repetition is required"). Single cells:
 `python3 scripts/run_experiments.py --only rr_ref`. `analysis.py` and
 `compare_rr_drr.py` compute the A19-A22 and A29 numbers for one CSV / one
-rr-drr pair.
+rr-drr pair. A28 also allows rerunning a specific pair once if two numbers
+you state as different turn out close; the report instead says "not
+separable" for the two pairs this run where that applies, since it does not
+need to claim either direction (see the report for which).
 
-The environment (WSL2 on a laptop, loopback) is noisy, so every cell is run 5
-times and the report uses medians; see the report for details. `results/`
-holds every run: `results/run1..run5/<cell>.csv` (the metrics CSVs), and
-`results/aside_p*` for the `--p` aside (A30). `run_all.sh` also writes each run's server
-log and config next to its CSV; those are kept in the git repository, not the zip.
+The environment (WSL2 on a laptop, loopback) can be noisy - re-run
+`run_all.sh` if a result looks implausible (e.g. rr slower than fcfs), which
+usually means something else was using the CPU during that run. `results/`
+holds `results/<cell>.csv`, `.server.log` and `.config.json` for the six
+required cells, and `results/aside_p1`, `results/aside_p10` for the `--p`
+aside (A30, not required). The server logs and config copies are kept in the
+git repository for reference (the logs hold the `A14 ...` lines), not in the
+submission zip, which ships only the six metrics CSVs per A.9.
 
 ## Layout
 
@@ -234,15 +240,17 @@ scripts/      gen_workload.py, run_experiments.py, run_all.sh, analysis.py, comp
               metrics.py, summarize.py, make_report.py, package.py, common.py
 workload/     small.txt medium.txt large.txt
 tests/        test_slice.cpp, integration_test.sh, manual test_*.py   (git repo only, not in the submission zip)
-results/      metrics CSVs of all runs (the git repo also keeps each run's server log and config)
+results/      <cell>.csv for the 6 required cells (A.9); .server.log/.config.json
+              per cell and the aside_p1/aside_p10 dirs are git-only, not in the zip
 ```
 
 ## Packaging
 
 `python3 scripts/package.py <entry1> <entry2>` writes `<entry1>_<entry2>_A.zip` with
-exactly what the assignment asks for: sources, Makefile, scripts, README, report,
-plots (top level), the workload and the metrics CSVs. The tests (`tests/`), and the
-per-run server logs and config copies that `run_all.sh` writes next to each CSV, live
-in the git repository only; the logs hold the `A14 ...` lines the A14 counts in the
-report come from, so those counts show as `n/a` if the report is regenerated from the
-zip without re-running the experiments.
+exactly what A.9 asks for: sources, Makefile, scripts, README, report, plots (top
+level), the workload, and the metrics CSVs of the six required cells (one run each,
+per A28). The tests (`tests/`), the per-run server logs and config copies, and the
+`--p` aside data all live in the git repository only, not the zip. The logs hold the
+`A14 ...` lines the A14 count and the `--p` aside's send() count come from, so those
+show as `n/a` if the report is regenerated from the zip without re-running the
+experiments.

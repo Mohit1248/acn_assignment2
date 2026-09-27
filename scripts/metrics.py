@@ -1,14 +1,11 @@
-"""Metric computation shared by summarize.py and make_report.py (pure stdlib).
-
-run_metrics() turns one run's CSV into every number the report needs. The
-experiments are repeated in several interleaved blocks (results/run1 ...
-results/runK, each holding all cells), because this laptop-hosted WSL2 setup
-is noisy from one run to the next; across() then gives the median and the
-min-max range of any metric over those repeats.
+"""Metric computation for the six required cells (A28), one run each - the
+spec's default ("No repetition is required"). run_metrics() turns one run's
+CSV into every number the report needs, so the report cannot drift from the
+data. If a pair of numbers ever needs the "rerun once, report both" exception
+(A28), that rerun's CSV is loaded as <cell>_rerun.csv - see load_all().
 """
 import os
 import re
-import statistics
 
 from common import (exclude_seed_rows, load_rows, nearest_rank_percentile,
                     size_class)
@@ -17,16 +14,17 @@ CLASSES = ("small", "medium", "large")
 A14_RE = re.compile(r"^A14 request_id=(\d+) filename=(\S+) line_bytes=(\d+) quantum=(\d+)$")
 
 CELLS = ("fcfs_ref", "sjf_ref", "rr_ref", "drr_ref", "fcfs_st1", "rr_st1")  # the six required by A28
-EXTRAS = ("drr_st1", "sjf_st1")  # supplementary, not required by A28
 REFERENCE = ("fcfs_ref", "sjf_ref", "rr_ref", "drr_ref")
-ALL_CELLS = CELLS + EXTRAS
 
 
-def _pct(values, p):
-    return nearest_rank_percentile(sorted(values), p)
+def fmt_count(x):
+    return "n/a" if x is None else f"{x:.0f}"
 
 
 def count_a14(log_path):
+    """A14 fire count from a run's server log. The submission zip does not
+    ship these logs (only the metrics CSVs, per A.9), so this returns None
+    when the log is absent rather than failing."""
     if not os.path.exists(log_path):
         return None
     with open(log_path) as f:
@@ -34,7 +32,8 @@ def count_a14(log_path):
 
 
 def send_calls(log_path):
-    """send() syscall count from the server's shutdown summary line, if present."""
+    """send() syscall count from a run's server-shutdown summary line, if the
+    log is present (the submission zip does not ship server logs)."""
     if not os.path.exists(log_path):
         return None
     with open(log_path) as f:
@@ -48,35 +47,32 @@ def send_calls(log_path):
 def run_metrics(csv_path, seed_count):
     rows = exclude_seed_rows(load_rows(csv_path), seed_count)
     n = len(rows)
-    waiting = [r["start_ns"] - r["arrival_ns"] for r in rows]
-    response = [r["finish_ns"] - r["arrival_ns"] for r in rows]
+    waiting = sorted(r["start_ns"] - r["arrival_ns"] for r in rows)
+    response = sorted(r["finish_ns"] - r["arrival_ns"] for r in rows)
     window_s = (max(r["finish_ns"] for r in rows) - min(r["arrival_ns"] for r in rows)) / 1e9
 
     m = {
         "n": n,
-        "wait_p50_ns": _pct(waiting, 50),
-        "wait_p99_ns": _pct(waiting, 99),
-        "resp_p50_ns": _pct(response, 50),
-        "resp_p99_ns": _pct(response, 99),
+        "wait_p50_ns": nearest_rank_percentile(waiting, 50),
+        "wait_p99_ns": nearest_rank_percentile(waiting, 99),
+        "resp_p50_ns": nearest_rank_percentile(response, 50),
+        "resp_p99_ns": nearest_rank_percentile(response, 99),
         "throughput": n / window_s,
-        "window_s": window_s,
         "by_class": {},
-        "forfeited_total": sum(r["forfeited_bytes"] for r in rows),
-        "rounds_mean": sum(r["rounds"] for r in rows) / n,
     }
     for cls in CLASSES:
         crows = [r for r in rows if size_class(r["filename"], r["bytes"]) == cls]
-        slow = [(r["finish_ns"] - r["arrival_ns"]) / r["bytes"] for r in crows if r["bytes"] > 0]
-        cw = [r["start_ns"] - r["arrival_ns"] for r in crows]
+        slow = sorted((r["finish_ns"] - r["arrival_ns"]) / r["bytes"] for r in crows if r["bytes"] > 0)
+        cw = sorted(r["start_ns"] - r["arrival_ns"] for r in crows)
         gets = [r for r in crows if r["op"] == "GET"]
         m["by_class"][cls] = {
             "n": len(crows),
             "n_get": len(gets),
-            "slow_med": _pct(slow, 50),
-            "slow_p99": _pct(slow, 99),
-            "wait_p50_ns": _pct(cw, 50),
-            "wait_p99_ns": _pct(cw, 99),
-            "wait_max_ns": max(cw),
+            "slow_med": nearest_rank_percentile(slow, 50),
+            "slow_p99": nearest_rank_percentile(slow, 99),
+            "wait_avg_ns": (sum(cw) / len(cw)) if cw else 0.0,
+            "wait_p50_ns": nearest_rank_percentile(cw, 50),
+            "wait_p99_ns": nearest_rank_percentile(cw, 99),
             "forfeited": sum(r["forfeited_bytes"] for r in crows),
             "rounds_mean_get": (sum(r["rounds"] for r in gets) / len(gets)) if gets else 0.0,
             "rounds_max_get": max((r["rounds"] for r in gets), default=0),
@@ -85,41 +81,22 @@ def run_metrics(csv_path, seed_count):
 
 
 def load_all(results_dir, seed_count=3):
-    """{'runs': [{'name', 'cells': {cell: metrics}, 'a14': {cell: n}}, ...],
-        'aside': {name: metrics + send_calls}}"""
-    out = {"runs": [], "aside": {}}
-    run_dirs = sorted((d for d in os.listdir(results_dir) if re.fullmatch(r"run\d+", d)),
-                      key=lambda d: int(d[3:]))
-    for d in run_dirs:
-        base = os.path.join(results_dir, d)
-        run = {"name": d, "cells": {}, "a14": {}}
-        for cell in ALL_CELLS:
-            p = os.path.join(base, cell + ".csv")
-            if os.path.exists(p):
-                run["cells"][cell] = run_metrics(p, seed_count)
-                run["a14"][cell] = count_a14(os.path.join(base, cell + ".server.log"))
-        out["runs"].append(run)
-    for name in sorted(os.listdir(results_dir)):
+    """{'cells': {cell: metrics}, 'a14': {cell: n_or_None}, 'rerun': {cell: metrics}}
+    'rerun' is only populated for a cell where <cell>_rerun.csv exists (A28's
+    "rerun that pair once" exception)."""
+    out = {"cells": {}, "a14": {}, "rerun": {}}
+    for cell in CELLS:
+        p = os.path.join(results_dir, cell + ".csv")
+        if os.path.exists(p):
+            out["cells"][cell] = run_metrics(p, seed_count)
+            out["a14"][cell] = count_a14(os.path.join(results_dir, cell + ".server.log"))
+        rp = os.path.join(results_dir, cell + "_rerun.csv")
+        if os.path.exists(rp):
+            out["rerun"][cell] = run_metrics(rp, seed_count)
+    out["aside"] = {}
+    for name in ("aside_p1", "aside_p10"):
         p = os.path.join(results_dir, name, "fcfs_ref.csv")
-        if name.startswith("aside_p") and os.path.exists(p):
+        if os.path.exists(p):
             out["aside"][name] = run_metrics(p, seed_count)
             out["aside"][name]["send_calls"] = send_calls(os.path.join(results_dir, name, "fcfs_ref.server.log"))
     return out
-
-
-def across(data, cell, getter):
-    """Median / min / max / all values of getter(metrics) over the repeated runs."""
-    vals = [getter(r["cells"][cell]) for r in data["runs"] if cell in r["cells"]]
-    return {"median": statistics.median(vals), "min": min(vals), "max": max(vals), "all": vals}
-
-
-def fmt_count(x):
-    return "n/a" if x != x else f"{x:.0f}"  # NaN -> n/a
-
-
-def across_a14(data, cell):
-    vals = [r["a14"][cell] for r in data["runs"] if r["a14"].get(cell) is not None]
-    if not vals:  # results/*.server.log are regenerated by run_all.sh but not shipped in the zip
-        nan = float("nan")
-        return {"median": nan, "min": nan, "max": nan, "all": []}
-    return {"median": statistics.median(vals), "min": min(vals), "max": max(vals), "all": vals}
