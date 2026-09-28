@@ -4,11 +4,6 @@
 Cells: fcfs/sjf/rr/drr at the reference config (4 server threads, 8 client
 threads), plus fcfs/rr again at server_threads=1.
 
-NOTE: until Stage 2 (K1-K4) lands, ./server ignores --sched and always uses
-the FIFO stub scheduler, so every cell behaves like fcfs - the orchestration
-works, but the numbers are not meaningful for the report yet. Run `make`
-first; the binaries are ./server and ./client at the repo root.
-
 Usage:
     python3 run_experiments.py                      # all 6 cells
     python3 run_experiments.py --only fcfs_ref,rr_ref
