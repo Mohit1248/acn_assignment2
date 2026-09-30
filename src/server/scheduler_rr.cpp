@@ -3,12 +3,6 @@
 
 #include "../common/clock.h"
 
-// rr (A12-A14) - --quantum Q bytes per round, FIFO among
-// requests waiting for their next round. A scheduled request is served for
-// at most Q bytes (the whole-line/A14-escape-hatch/forfeiture accounting
-// itself lives in serve_slice, K1/slice.cpp - this class only owns queue
-// ordering) then requeued at the tail if not finished. A request that has
-// transferred its final byte leaves the system instead of being requeued.
 class SchedulerRr : public IScheduler {
 public:
     void enqueue(Request* req) override { queue_.push(req); }
@@ -21,7 +15,6 @@ public:
         return req;
     }
 
-    // Requeue at the tail (A12) - plain push is already tail-insertion here.
     void requeue(Request* req) override { queue_.push(req); }
 
     size_t queue_depth() const override { return queue_.size(); }

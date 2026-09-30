@@ -12,9 +12,6 @@
 
 #include "../common/client_ops.h"
 
-// C3 (Mohit, Stage 1): experiment driver (A4). Seeds the server once, then
-// generates N closed-loop requests from client_threads concurrent threads.
-
 namespace {
 
 std::string base_name(const std::string& path) {
@@ -23,9 +20,6 @@ std::string base_name(const std::string& path) {
 }
 
 std::vector<std::string> list_workload_files(const std::string& dir) {
-    // Plain POSIX (opendir/stat): no <filesystem> dependency on older g++, and a
-    // missing directory gives an empty list (reported below) instead of an
-    // uncaught exception.
     std::vector<std::string> files;
     DIR* d = opendir(dir.c_str());
     if (d == nullptr) return files;
@@ -37,7 +31,7 @@ std::vector<std::string> list_workload_files(const std::string& dir) {
         if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) files.push_back(path);
     }
     closedir(d);
-    std::sort(files.begin(), files.end());  // deterministic seeding order
+    std::sort(files.begin(), files.end());
     return files;
 }
 
@@ -55,14 +49,8 @@ void worker(const std::string& ip, uint16_t port, const std::vector<std::string>
         const std::string& path = files[file_pick(rng)];
         std::string name = base_name(path);
 
-        // Closed-loop: get_file/put_file block for the full exchange before
-        // this thread claims its next request (A4).
         ExchangeResult r;
         if (coin(rng) == 0) {
-            // Discard the body during load generation - `load` only needs
-            // to generate traffic and let the server measure it (A4: "the
-            // client reports nothing"); `client get` (not `load`) is what
-            // actually saves a file for a user.
             r = get_file(ip, port, name, "/dev/null");
         } else {
             r = put_file(ip, port, path);
@@ -74,7 +62,7 @@ void worker(const std::string& ip, uint16_t port, const std::vector<std::string>
     }
 }
 
-}  // namespace
+}
 
 bool run_load(const std::string& server_ip, uint16_t server_port, const std::string& workload_dir,
               uint64_t n_requests, int client_threads) {
@@ -85,14 +73,6 @@ bool run_load(const std::string& server_ip, uint16_t server_port, const std::str
     }
     std::atomic<uint64_t> failures{0};
 
-    // Seed: PUT every workload file once, sequentially, before any
-    // concurrent load requests begin (A4: "seeding requests are not
-    // counted in any reported metric"). The server's CSV logs every
-    // completed request unconditionally (A23), so these rows DO appear in
-    // it; because seeding fully completes (closed-loop, single connection
-    // at a time) before the first load-generated request is even admitted,
-    // analysis scripts can reliably exclude seeding by sorting the CSV by
-    // arrival_ns/request_id and dropping the first files.size() rows.
     for (const auto& path : files) {
         ExchangeResult r = put_file(server_ip, server_port, path);
         if (!r.ok) {
@@ -109,5 +89,5 @@ bool run_load(const std::string& server_ip, uint16_t server_port, const std::str
         threads.emplace_back(worker, server_ip, server_port, std::cref(files), &counter, &failures, n_requests, t);
     }
     for (auto& th : threads) th.join();
-    return failures.load() == 0;  // exit status only - the client reports no metrics (A4)
+    return failures.load() == 0;
 }

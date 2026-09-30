@@ -3,12 +3,6 @@
 
 #include "../common/clock.h"
 
-// sjf (A11): the queued request with the smallest declared byte count is
-// served next - req->bytes, which is the file size for a GET and the count in
-// the request line for a PUT, so both verbs are ordered by the same key. Ties
-// go to the earlier arrival (the queue keeps arrival order). No aging: the
-// starvation of large requests is an expected property of SJF that the report
-// discusses, not something to prevent. Never preempts (one round per request).
 class SchedulerSjf : public IScheduler {
 public:
     void enqueue(Request* req) override { queue_.push(req); }
@@ -17,7 +11,7 @@ public:
         Request* req = queue_.pop_pick([](const std::vector<Request*>& items) {
             size_t best = 0;
             for (size_t i = 1; i < items.size(); ++i) {
-                if (items[i]->bytes < items[best]->bytes) best = i;  // strict < keeps the earliest tie
+                if (items[i]->bytes < items[best]->bytes) best = i;
             }
             return best;
         });

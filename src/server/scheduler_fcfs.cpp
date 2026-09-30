@@ -3,11 +3,6 @@
 
 #include "../common/clock.h"
 
-// fcfs (A10): requests are served in arrival order. Never preempts, so
-// requeue() is only reachable if a caller misuses the interface - kept
-// correct (re-admits at the tail) rather than asserting, since K4's wiring
-// glue is joint work and shouldn't be able to deadlock on a logic error
-// here.
 class SchedulerFcfs : public IScheduler {
 public:
     void enqueue(Request* req) override { queue_.push(req); }

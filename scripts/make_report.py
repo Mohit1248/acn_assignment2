@@ -1,13 +1,4 @@
-#!/usr/bin/env python3
-"""Generates the figures (PNG, repo top level) and report_A.pdf from results/,
-one run per cell (A28's default: "No repetition is required").
 
-Needs matplotlib and reportlab (not used by anything else in the project):
-    python scripts/make_report.py [results_dir]
-
-Every number in the text and tables is computed from the per-request CSVs by
-metrics.py, so the report cannot drift from the data.
-"""
 import os
 import sys
 
@@ -15,19 +6,19 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SCRIPT_DIR)
 sys.path.insert(0, SCRIPT_DIR)
 
-import matplotlib  # noqa: E402
+import matplotlib
 
 matplotlib.use("Agg")
-import matplotlib.pyplot as plt  # noqa: E402
-from reportlab.lib import colors  # noqa: E402
-from reportlab.lib.pagesizes import letter  # noqa: E402
-from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet  # noqa: E402
-from reportlab.lib.units import inch  # noqa: E402
-from reportlab.platypus import (Image, KeepTogether, Paragraph, SimpleDocTemplate,  # noqa: E402
+import matplotlib.pyplot as plt
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import letter
+from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+from reportlab.lib.units import inch
+from reportlab.platypus import (Image, KeepTogether, Paragraph, SimpleDocTemplate,
                                 Spacer, Table, TableStyle)
 
-from common import N_REQUESTS, QUANTUM  # noqa: E402
-from metrics import CELLS, CLASSES, REFERENCE, fmt_count, load_all  # noqa: E402
+from common import N_REQUESTS, QUANTUM
+from metrics import CELLS, CLASSES, REFERENCE, fmt_count, load_all
 
 AUTHORS = os.environ.get("REPORT_AUTHORS", "Mohit and teammate")
 RESULTS = sys.argv[1] if len(sys.argv) > 1 else os.path.join(ROOT, "results")
@@ -38,28 +29,20 @@ LABEL = {"fcfs_ref": "fcfs", "sjf_ref": "sjf", "rr_ref": "rr", "drr_ref": "drr",
          "fcfs_st1": "fcfs", "rr_st1": "rr"}
 THR = {"fcfs_ref": 4, "sjf_ref": 4, "rr_ref": 4, "drr_ref": 4, "fcfs_st1": 1, "rr_st1": 1}
 
-
 def pol(cell):
     return cell.split("_")[0]
-
 
 def m(cell):
     return D["cells"][cell]
 
-
 def slow(cell, cls, key="slow_med"):
     return m(cell)["by_class"][cls][key]
-
 
 def wait_avg(cell, cls):
     return m(cell)["by_class"][cls]["wait_avg_ns"] / 1000.0
 
-
 plt.rcParams.update({"font.size": 7.5, "axes.titlesize": 8, "axes.labelsize": 7.5,
                      "legend.fontsize": 7, "figure.dpi": 200})
-
-
-# ------------------------------------------------------------------ figures --
 
 def fig1():
     fig, (a, b) = plt.subplots(1, 2, figsize=(7.4, 2.7))
@@ -84,7 +67,6 @@ def fig1():
     fig.savefig(os.path.join(ROOT, "fig1_waiting_throughput.png"))
     plt.close(fig)
 
-
 def fig2():
     fig, axes = plt.subplots(1, 2, figsize=(7.4, 2.6), sharey=True)
     for ax, group, title in ((axes[0], REFERENCE, "(a) 4 server threads (reference)"),
@@ -104,7 +86,6 @@ def fig2():
     fig.tight_layout()
     fig.savefig(os.path.join(ROOT, "fig2_slowdown.png"))
     plt.close(fig)
-
 
 def fig3():
     fig, axes = plt.subplots(1, 3, figsize=(7.4, 2.5))
@@ -135,7 +116,6 @@ def fig3():
     fig.savefig(os.path.join(ROOT, "fig3_rr_vs_drr.png"))
     plt.close(fig)
 
-
 def fig4():
     fig, axes = plt.subplots(1, 2, figsize=(7.4, 2.5), sharey=True)
     for ax, group, title in ((axes[0], REFERENCE, "(a) 4 server threads"),
@@ -156,9 +136,6 @@ def fig4():
     fig.savefig(os.path.join(ROOT, "fig4_sjf_starvation.png"))
     plt.close(fig)
 
-
-# ------------------------------------------------------------------- report --
-
 ss = getSampleStyleSheet()
 BODY = ParagraphStyle("body", parent=ss["BodyText"], fontName="Helvetica", fontSize=8.6, leading=10.6,
                       spaceAfter=3.5)
@@ -168,10 +145,8 @@ TITLE = ParagraphStyle("title", parent=ss["Title"], fontName="Helvetica-Bold", f
                        spaceAfter=2)
 SMALL = ParagraphStyle("small", parent=BODY, fontSize=7.4, leading=9, textColor=colors.HexColor("#333333"))
 
-
 def P(text, style=BODY):
     return Paragraph(text, style)
-
 
 def table(rows, col_widths, header_rows=1, font=7.4):
     t = Table(rows, colWidths=col_widths, repeatRows=header_rows)
@@ -186,20 +161,14 @@ def table(rows, col_widths, header_rows=1, font=7.4):
     ]))
     return t
 
-
 def fig_img(name, width_in=7.2):
     from PIL import Image as PILImage
     path = os.path.join(ROOT, name)
     w, h = PILImage.open(path).size
     return Image(path, width=width_in * inch, height=width_in * inch * h / w)
 
-
 def close(a, b, tol=0.15):
-    """True if a and b are within `tol` (fraction) of their average - used to
-    decide when to say two numbers "are not separable" instead of claiming a
-    direction that a single run cannot support (A28)."""
     return abs(a - b) / max(a, b) <= tol
-
 
 def build_pdf():
     w50 = {c: m(c)["wait_p50_ns"] / 1000 for c in CELLS}
@@ -223,7 +192,6 @@ def build_pdf():
     story.append(P(f"{AUTHORS}", SMALL))
     story.append(Spacer(1, 3))
 
-    # ---------------------------------------------------------------- 1
     story.append(P("1. The four policies as implemented", H1))
     story.append(P(
         "<b>Queue and threads (A5).</b> An acceptor thread only calls accept(). Each connection goes to a short-lived "
@@ -268,7 +236,6 @@ def build_pdf():
         "takes 3 and forfeits 0), including a GET that keeps serving the old file after a PUT has replaced it, and by "
         "an integration suite that runs all four policies end to end."))
 
-    # ---------------------------------------------------------------- 2
     story.append(P("2. Experimental setup", H1))
     story.append(P(
         "<b>Machine and configuration.</b> Server and client run on one laptop under WSL2 (Ubuntu 24.04, 8 logical "
@@ -291,7 +258,6 @@ def build_pdf():
         "separable rather than rerun for a direction I do not need. Raw per-request CSVs of all six runs are in "
         "results/."))
 
-    # ---------------------------------------------------------------- 3
     story.append(P("3. Per-run results", H1))
     rows = [["cell", "waiting p50 (us)", "waiting p99 (us)", "response p50 (us)", "response p99 (us)", "throughput (req/s)"]]
     for c in CELLS:
@@ -343,7 +309,6 @@ def build_pdf():
         f"way: p99 response {r99['fcfs_st1'] / 1000:.0f} ms (fcfs) vs {r99['rr_st1'] / 1000:.0f} ms (rr), because the "
         f"large requests now wait through many rounds. Response time alone would have hidden the waiting-time gain."))
 
-    # ---------------------------------------------------------------- 4
     story.append(P("4. rr versus drr (A29)", H1))
     rows = [["", "forfeited bytes", "", "", "rounds / GET", "", "A14 fires", "large.txt slowdown"],
             ["cell", "small", "medium", "large", "medium", "large", "per run", "median / p99"]]
@@ -389,7 +354,6 @@ def build_pdf():
         f"reference configuration, so an extra round, or a zero-progress deficit round, is soon followed by another "
         f"turn."))
 
-    # ---------------------------------------------------------------- 5
     story.append(P("5. Trade-offs and the SJF starvation", H1))
     story.append(fig_img("fig4_sjf_starvation.png"))
     story.append(P(
@@ -422,7 +386,6 @@ def build_pdf():
         f"waits; with an open arrival stream of small requests it would be unbounded, which is why real systems add "
         f"aging."))
 
-    # ---------------------------------------------------------------- 6
     story.append(P("6. Caveats", H1))
     p1 = D["aside"].get("aside_p1")
     p10 = D["aside"].get("aside_p10")
@@ -448,7 +411,6 @@ def build_pdf():
                             author="Mohit")
     doc.build(story)
     return doc.page
-
 
 if __name__ == "__main__":
     fig1()

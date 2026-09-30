@@ -1,9 +1,3 @@
-"""Metric computation for the six required cells (A28), one run each - the
-spec's default ("No repetition is required"). run_metrics() turns one run's
-CSV into every number the report needs, so the report cannot drift from the
-data. If a pair of numbers ever needs the "rerun once, report both" exception
-(A28), that rerun's CSV is loaded as <cell>_rerun.csv - see load_all().
-"""
 import os
 import re
 
@@ -13,27 +7,19 @@ from common import (exclude_seed_rows, load_rows, nearest_rank_percentile,
 CLASSES = ("small", "medium", "large")
 A14_RE = re.compile(r"^A14 request_id=(\d+) filename=(\S+) line_bytes=(\d+) quantum=(\d+)$")
 
-CELLS = ("fcfs_ref", "sjf_ref", "rr_ref", "drr_ref", "fcfs_st1", "rr_st1")  # the six required by A28
+CELLS = ("fcfs_ref", "sjf_ref", "rr_ref", "drr_ref", "fcfs_st1", "rr_st1")
 REFERENCE = ("fcfs_ref", "sjf_ref", "rr_ref", "drr_ref")
-
 
 def fmt_count(x):
     return "n/a" if x is None else f"{x:.0f}"
 
-
 def count_a14(log_path):
-    """A14 fire count from a run's server log. The submission zip does not
-    ship these logs (only the metrics CSVs, per A.9), so this returns None
-    when the log is absent rather than failing."""
     if not os.path.exists(log_path):
         return None
     with open(log_path) as f:
         return sum(1 for line in f if A14_RE.match(line.strip()))
 
-
 def send_calls(log_path):
-    """send() syscall count from a run's server-shutdown summary line, if the
-    log is present (the submission zip does not ship server logs)."""
     if not os.path.exists(log_path):
         return None
     with open(log_path) as f:
@@ -42,7 +28,6 @@ def send_calls(log_path):
             if m:
                 return int(m.group(1))
     return None
-
 
 def run_metrics(csv_path, seed_count):
     rows = exclude_seed_rows(load_rows(csv_path), seed_count)
@@ -79,11 +64,7 @@ def run_metrics(csv_path, seed_count):
         }
     return m
 
-
 def load_all(results_dir, seed_count=3):
-    """{'cells': {cell: metrics}, 'a14': {cell: n_or_None}, 'rerun': {cell: metrics}}
-    'rerun' is only populated for a cell where <cell>_rerun.csv exists (A28's
-    "rerun that pair once" exception)."""
     out = {"cells": {}, "a14": {}, "rerun": {}}
     for cell in CELLS:
         p = os.path.join(results_dir, cell + ".csv")

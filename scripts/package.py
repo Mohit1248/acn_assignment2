@@ -1,23 +1,11 @@
-#!/usr/bin/env python3
-"""Builds the Part A submission zip:  <entry1>_<entry2>_A.zip
 
-    python3 scripts/package.py <entry1> <entry2>
-
-Contents = exactly what spec A.9 asks for: all sources, the Makefile and the scripts
-needed to reproduce the experiments; the README; the report PDF; the plots as PNG
-files at the top level; the workload (test files) and the metrics CSVs of the six
-required cells (A28: one run per cell). Left out: the optional --p aside (A30, not
-a required experiment), unit/integration tests (they stay in the git repository),
-per-run server logs and config copies, build artefacts, server data dirs, Python
-caches, internal notes.
-"""
 import glob
 import os
 import sys
 import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from metrics import CELLS  # noqa: E402  - the six cells required by A28
+from metrics import CELLS
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -26,20 +14,18 @@ TOP_GLOBS = ["fig*.png"]
 DIRS = ["src", "scripts", "workload", "results"]
 REQUIRED_CSVS = {f"results/{cell}.csv" for cell in CELLS}
 
-
 def skip(rel):
     parts = rel.split("/")
     name = parts[-1]
     if "__pycache__" in parts or name.endswith(".pyc"):
         return True
     if any(p.endswith(".data") or p == "_warmup" for p in parts):
-        return True  # server storage dirs created by the experiment runs
+        return True
     if rel.startswith("results/"):
-        return rel not in REQUIRED_CSVS  # only the 6 CSVs A28 asks for - not logs, configs, or the --p aside
+        return rel not in REQUIRED_CSVS
     if rel == "scripts/package.py":
-        return True  # packaging helper, not needed to reproduce the experiments
+        return True
     return False
-
 
 def main():
     if len(sys.argv) != 3:
@@ -69,7 +55,6 @@ def main():
         for rel in files:
             z.write(os.path.join(ROOT, rel), rel)
     print(f"{out}: {len(files)} files, {os.path.getsize(out) / 1024:.0f} KB")
-
 
 if __name__ == "__main__":
     main()

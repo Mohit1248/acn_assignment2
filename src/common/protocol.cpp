@@ -11,19 +11,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-// ---- pure parsing / formatting (locked in Phase 0 - no socket I/O) --------
-//
-// Reasonable choices made here (stated per Ground Rules; mirror in README):
-//   - Tokens are split on single/multiple ASCII spaces; extra/missing tokens
-//     make a line MALFORMED rather than being tolerated.
-//   - PUT's byte count must be a non-negative base-10 integer with no sign
-//     and no leading/trailing junk; anything else is "non-numeric".
-//   - An empty filename, or one containing '/', or exactly "." or "..", is
-//     unsafe (A25). Filenames are otherwise not restricted (e.g. spaces are
-//     allowed - GET/PUT lines are still exactly 2/3 whitespace-separated
-//     tokens, so filenames containing spaces cannot be represented on the
-//     wire; this is a known, accepted limitation of the line format).
-
 namespace {
 
 std::vector<std::string> split_ws(const std::string& s) {
@@ -52,7 +39,7 @@ bool parse_u64(const std::string& tok, uint64_t& out) {
     return true;
 }
 
-}  // namespace
+}
 
 ParsedRequestLine parse_request_line(const std::string& line) {
     ParsedRequestLine result;
@@ -126,7 +113,6 @@ ParsedResponseLine parse_response_line(const std::string& line) {
     }
 
     if (!tok.empty() && tok[0] == "ERR") {
-        // reason is everything after "ERR ", not just the first token
         size_t pos = line.find(' ');
         result.ok = false;
         result.reason = (pos == std::string::npos) ? std::string() : line.substr(pos + 1);
@@ -141,27 +127,20 @@ bool is_filename_safe(const std::string& name) {
     if (name.empty()) return false;
     if (name == "." || name == "..") return false;
     if (name.find('/') != std::string::npos) return false;
-    if (name.find('\0') != std::string::npos) return false;  // would truncate the path at open()
+    if (name.find('\0') != std::string::npos) return false;
     return true;
 }
-
-// ---- socket I/O primitives -------------------------------------------------
-// Implementation owner: Stage 1 "server infrastructure" track (S2/S3/S9).
-// Done.
 
 namespace {
 
 using Clock = std::chrono::steady_clock;
 
-// Arms SO_RCVTIMEO with the time left until `deadline`; false if none is left.
-// SO_RCVTIMEO alone bounds each recv() call, so a peer that sends one byte
-// every few seconds would never trip it and could hold a thread for hours.
 bool arm_remaining(int fd, Clock::time_point deadline) {
     auto left = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - Clock::now()).count();
     if (left <= 0) return false;
     struct timeval tv;
     tv.tv_sec = static_cast<time_t>(left / 1000);
-    tv.tv_usec = static_cast<suseconds_t>((left % 1000) * 1000);  // never 0/0: that would mean "no timeout"
+    tv.tv_usec = static_cast<suseconds_t>((left % 1000) * 1000);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     return true;
 }
@@ -173,13 +152,11 @@ void set_recv_timeout(int fd, int ms) {
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 }
 
-}  // namespace
+}
 
 HeaderReadResult read_header_line(int fd, int timeout_ms) {
     HeaderReadResult r;
 
-    // timeout_ms bounds the WHOLE header read (negative = leave the socket's
-    // existing timeout alone), not each recv() individually.
     const bool bounded = timeout_ms >= 0;
     const auto deadline = Clock::now() + std::chrono::milliseconds(bounded ? timeout_ms : 0);
 
@@ -205,27 +182,21 @@ HeaderReadResult read_header_line(int fd, int timeout_ms) {
             return r;
         }
 
-        // Scan this chunk for '\n'. Everything before it joins the header
-        // line; everything after it belongs to the body (leftover) - must
-        // be handed to the body reader, never discarded (framing rules).
         char* nl = static_cast<char*>(memchr(buf, '\n', static_cast<size_t>(n)));
         if (nl) {
             size_t line_part = static_cast<size_t>(nl - buf);
             line.append(buf, line_part);
-            size_t consumed = line_part + 1;  // include the '\n' itself
+            size_t consumed = line_part + 1;
             size_t remaining = static_cast<size_t>(n) - consumed;
             if (remaining > 0) {
                 r.leftover.assign(buf + consumed, buf + consumed + remaining);
             }
             r.ok = true;
             r.line = line;
-            // arm_remaining() left only the time that was still unused as the
-            // per-recv() timeout; give later reads on this socket the full one.
             if (bounded) set_recv_timeout(fd, timeout_ms);
             return r;
         }
         line.append(buf, static_cast<size_t>(n));
-        // Guard against an unbounded header line from a hostile/broken client.
         if (line.size() > 8192) {
             r.ok = false;
             r.error = "header line too long";
@@ -239,8 +210,6 @@ bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n, int to
     const bool bounded = total_timeout_ms >= 0;
     const auto deadline = Clock::now() + std::chrono::milliseconds(bounded ? total_timeout_ms : 0);
 
-    // Drain leftover first - bytes already read off the socket during the
-    // header read but not yet consumed.
     if (!leftover.empty()) {
         size_t take = std::min(leftover.size(), n);
         if (take > 0 && out != nullptr) {
@@ -251,9 +220,9 @@ bool read_exact(int fd, std::vector<char>& leftover, char* out, size_t n, int to
     }
 
     while (filled < n) {
-        if (bounded && !arm_remaining(fd, deadline)) return false;  // took too long overall
+        if (bounded && !arm_remaining(fd, deadline)) return false;
         ssize_t r = recv(fd, out + filled, n - filled, 0);
-        if (r <= 0) return false;  // error, timeout or peer closed early
+        if (r <= 0) return false;
         filled += static_cast<size_t>(r);
     }
     return true;
@@ -268,8 +237,8 @@ bool send_all(int fd, const char* data, size_t n) {
     while (sent < n) {
         g_send_calls.fetch_add(1, std::memory_order_relaxed);
         ssize_t s = send(fd, data + sent, n - sent, MSG_NOSIGNAL);
-        if (s < 0 && errno == EINTR) continue;  // interrupted by a signal, retry
-        if (s <= 0) return false;                // real send error
+        if (s < 0 && errno == EINTR) continue;
+        if (s <= 0) return false;
         sent += static_cast<size_t>(s);
     }
     return true;

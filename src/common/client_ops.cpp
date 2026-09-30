@@ -9,9 +9,6 @@
 
 #include "protocol.h"
 
-// C2 (Mohit, Stage 1): put/get over the framed protocol. One connection per
-// call (framing rules: a connection carries exactly one request).
-
 namespace {
 
 constexpr int kResponseTimeoutMs = 10000;
@@ -43,7 +40,7 @@ std::string basename_of(const std::string& path) {
     return pos == std::string::npos ? path : path.substr(pos + 1);
 }
 
-}  // namespace
+}
 
 ExchangeResult put_file(const std::string& ip, uint16_t port, const std::string& local_path) {
     std::ifstream in(local_path, std::ios::binary);

@@ -6,10 +6,6 @@
 #include "../common/config.h"
 #include "load.h"
 
-// CLI dispatch (C1, A2/A3) - Stage 1, Mohit. Argument parsing/validation is
-// filled in here now; the actual exchanges are TODO in client_ops.cpp (C2)
-// and load.cpp (C3).
-
 namespace {
 
 [[noreturn]] void usage_error(const std::string& msg) {
@@ -17,7 +13,7 @@ namespace {
     std::exit(1);
 }
 
-}  // namespace
+}
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -52,7 +48,7 @@ int main(int argc, char** argv) {
     if (op == "load" && !has_requests) usage_error("--requests is required for load");
     if (op != "load" && has_requests) usage_error("--requests is only valid with load");
 
-    Config cfg = load_config(config_path, /*require_load_balancer=*/false);
+    Config cfg = load_config(config_path, false);
 
     if (op == "put") {
         ExchangeResult r = put_file(cfg.server.ip, cfg.server.port, target);

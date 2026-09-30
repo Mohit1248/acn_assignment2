@@ -23,21 +23,11 @@
 #include "../common/protocol.h"
 #include "scheduler.h"
 
-
-// CLI parsing + validation (A1) - Stage 1, S1, DONE (Phase 0).
-// Accept loop / worker pool / signal-driven shutdown - S2/S3/S4/S6/S7/S8/S9,
-// this pass.
-
 namespace {
 
-// TODO(S3): confirm this against the assignment PDF - not a config.json
-// field, so it's a local constant for now.
 constexpr int kHeaderTimeoutMs = 5000;
 
-// Largest PUT body we accept. The spec sets no limit; without one, a request
-// like "PUT x 99999999999999" makes the transfer path try to allocate that
-// much memory and abort the whole server. Rejected with ERR at admission.
-constexpr uint64_t kMaxPutBytes = 1ULL << 30;  // 1 GiB
+constexpr uint64_t kMaxPutBytes = 1ULL << 30;
 
 struct Args {
     std::string sched;
@@ -112,7 +102,6 @@ Args parse_args(int argc, char** argv) {
         usage_error("--quantum is not allowed with --sched fcfs or sjf");
     }
 
-    // Without this the server starts fine and then fails every single request.
     struct stat dir_st{};
     if (::stat(args.file_dir.c_str(), &dir_st) != 0 || !S_ISDIR(dir_st.st_mode)) {
         usage_error("--file '" + args.file_dir + "' is not an existing directory");
@@ -128,9 +117,6 @@ std::atomic<uint64_t> g_next_id{1};
 std::atomic<uint64_t> g_requests_served{0};
 std::atomic<uint64_t> g_bytes_served{0};
 
-// Admission threads are detached, so shutdown has to be able to wait for
-// them: a request accepted just before SIGTERM must still be enqueued and
-// answered (A26), and the scheduler/args must outlive every such thread.
 std::atomic<int> g_active_admissions{0};
 
 struct AdmissionGuard {
@@ -144,7 +130,7 @@ int make_listening_socket(const std::string& ip, uint16_t port) {
         std::exit(1);
     }
     int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));  // A26
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
@@ -169,28 +155,19 @@ int make_listening_socket(const std::string& ip, uint16_t port) {
 
 void send_err_and_close(int fd, const std::string& reason) {
     std::string err = format_err(reason);
-    send_all(fd, err.data(), err.size());  // best-effort; ignore failure here
+    send_all(fd, err.data(), err.size());
     close(fd);
 }
 
-// Runs once per accepted connection, then exits. Decoupled from serving, so
-// a silent/slow client only ties up its own short-lived thread - never a
-// server worker, and never blocks HEALTH behind it.
 void admit_connection(int fd, IScheduler* sched, const Args& args) {
-    AdmissionGuard guard;  // counted in g_active_admissions by the acceptor
+    AdmissionGuard guard;
 
-    // TCP_NODELAY: --p is about how many lines go into one write(), so every
-    // write must actually go out as its own segment instead of being held back
-    // by Nagle's algorithm (which also injects ~40 ms stalls on small writes).
-    // SO_SNDTIMEO: a peer that stops reading must fail a send after a while
-    // instead of pinning a worker forever.
     int one = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof(one));
     struct timeval snd_timeout{};
     snd_timeout.tv_sec = 10;
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &snd_timeout, sizeof(snd_timeout));
 
-    // S3: bounded header read so a silent client can't pin a worker.
     HeaderReadResult hdr = read_header_line(fd, kHeaderTimeoutMs);
     if (!hdr.ok) {
         send_err_and_close(fd, hdr.error.empty() ? "header read timeout" : hdr.error);
@@ -199,27 +176,23 @@ void admit_connection(int fd, IScheduler* sched, const Args& args) {
 
     ParsedRequestLine parsed = parse_request_line(hdr.line);
     if (parsed.type == ReqType::MALFORMED) {
-        send_err_and_close(fd, parsed.error);  // S8/A24
+        send_err_and_close(fd, parsed.error);
         return;
     }
 
     if (parsed.type == ReqType::HEALTH) {
-        // S6: immediate, out-of-band, never enqueued, never in the CSV.
-        // Now genuinely immediate - no longer stuck behind a worker or a
-        // stuck peer, since admission is decoupled from serving.
         std::string resp = format_ok(sched->queue_depth());
         send_all(fd, resp.data(), resp.size());
         close(fd);
         return;
     }
 
-    // S4: filename sandboxing before any file I/O.
     if (!is_filename_safe(parsed.filename)) {
         send_err_and_close(fd, "unsafe filename");
         return;
     }
     if (parsed.type == ReqType::PUT && parsed.byte_count > kMaxPutBytes) {
-        send_err_and_close(fd, "declared size too large");  // A24
+        send_err_and_close(fd, "declared size too large");
         return;
     }
     std::string full_path = args.file_dir + "/" + parsed.filename;
@@ -234,11 +207,6 @@ void admit_connection(int fd, IScheduler* sched, const Args& args) {
 
     if (parsed.type == ReqType::GET) {
         req->op = Request::Op::GET;
-        // Pin the file now. The size declared to the scheduler (SJF's key) and
-        // every later round come from this one descriptor, so a PUT that
-        // renames a new version over the name meanwhile cannot change what
-        // this GET serves, and the size the client receives is the size of
-        // the version it gets (A7).
         int ffd = ::open(full_path.c_str(), O_RDONLY);
         struct stat st{};
         if (ffd < 0 || ::fstat(ffd, &st) != 0 || !S_ISREG(st.st_mode)) {
@@ -254,65 +222,52 @@ void admit_connection(int fd, IScheduler* sched, const Args& args) {
         req->bytes = parsed.byte_count;
     }
 
-    sched->enqueue(req);  // admitted (A5) - queue can now genuinely build up
+    sched->enqueue(req);
 }
 
-// Single thread: only ever calls accept(). Spins off a detached admission
-// thread per connection so no client - however slow or silent - can block
-// the ability to accept the *next* connection.
 void acceptor_loop(int listen_fd, IScheduler* sched, const Args& args) {
     while (true) {
         sockaddr_in client_addr{};
         socklen_t addrlen = sizeof(client_addr);
         int fd = accept(listen_fd, reinterpret_cast<sockaddr*>(&client_addr), &addrlen);
         if (fd < 0) {
-            if (g_shutdown.load()) return;  // listen_fd closed for shutdown (S9)
-            continue;                        // transient accept error - retry
+            if (g_shutdown.load()) return;
+            continue;
         }
-        g_active_admissions.fetch_add(1);  // before the thread starts, so shutdown can't miss it
+        g_active_admissions.fetch_add(1);
         try {
             std::thread(admit_connection, fd, sched, std::cref(args)).detach();
         } catch (const std::system_error&) {
-            // Out of threads: shed this connection with an ERR rather than
-            // letting the exception abort the whole server.
             g_active_admissions.fetch_sub(1);
             send_err_and_close(fd, "server busy");
         }
     }
 }
 
-// server_threads workers, each purely a consumer of the shared queue - never
-// touches accept() or header parsing. This is what actually satisfies A5:
-// serving order is decided by whichever policy is active, not by who
-// happened to accept a connection.
 void server_worker_loop(IScheduler* sched, CsvWriter& csv, const SliceParams& sp) {
     while (true) {
-        Request* r = sched->next();  // blocks until available or shutdown
-        if (!r) return;              // shutdown drained the queue
+        Request* r = sched->next();
+        if (!r) return;
 
         SliceResult res = SliceResult::FAILED;
         try {
-            res = serve_slice(r, r->client_fd, sp);  // one round (K1/K2)
+            res = serve_slice(r, r->client_fd, sp);
         } catch (const std::exception&) {
-            // One bad request (e.g. bad_alloc) must not take down the worker
-            // or the server; tell the client instead of closing silently (A24).
             std::string e = format_err("internal error");
             send_all(r->client_fd, e.data(), e.size());
         }
 
         if (res == SliceResult::PREEMPTED) {
-            sched->requeue(r);  // rr/drr: back to the tail, all state kept in *r (A17)
+            sched->requeue(r);
             continue;
         }
 
         r->finish_ns = now_monotonic_ns();
         if (res == SliceResult::DONE) {
-            csv.write_row(*r);  // S7 - never called for HEALTH
+            csv.write_row(*r);
             g_requests_served.fetch_add(1);
             g_bytes_served.fetch_add(r->bytes);
         }
-        // FAILED: serve_slice already replied ERR where a reply was possible
-        // (unwritable destination, short body); a dead connection needs none.
 
         release_request(r);
         close(r->client_fd);
@@ -320,11 +275,11 @@ void server_worker_loop(IScheduler* sched, CsvWriter& csv, const SliceParams& sp
     }
 }
 
-}  // namespace
+}
 
 int main(int argc, char** argv) {
     Args args = parse_args(argc, argv);
-    Config cfg = load_config(args.config_path, /*require_load_balancer=*/false);
+    Config cfg = load_config(args.config_path, false);
 
     CsvWriter csv(args.metrics_out);
 
@@ -332,7 +287,7 @@ int main(int argc, char** argv) {
 
     SliceParams slice_params;
     slice_params.policy = parse_policy(args.sched);
-    slice_params.quantum = args.quantum;  // only rr / drr use it (A1 rejects it otherwise)
+    slice_params.quantum = args.quantum;
     slice_params.p_lines = args.p_lines;
 
     std::signal(SIGINT, on_signal);
@@ -362,11 +317,6 @@ int main(int argc, char** argv) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 
-    // S9/A26: graceful shutdown. Order matters:
-    //   1. stop accepting (wakes the acceptor out of accept()) and join it;
-    //   2. wait for every in-flight admission thread, so a request accepted
-    //      just before the signal is still enqueued rather than dropped;
-    //   3. only then tell the scheduler to drain, and join the workers.
     shutdown(listen_fd, SHUT_RDWR);
     acceptor.join();
     close(listen_fd);

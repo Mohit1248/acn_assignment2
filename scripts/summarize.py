@@ -1,8 +1,4 @@
-#!/usr/bin/env python3
-"""Prints every number the report uses, from one run per cell (A28).
 
-    python3 scripts/summarize.py [results_dir]
-"""
 import os
 import sys
 
@@ -12,10 +8,8 @@ results = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "results")
 D = load_all(results)
 
-
 def us(ns):
     return ns / 1000.0
-
 
 print("== waiting / response p50, p99 (us) and throughput (req/s) ==")
 for cell in CELLS:

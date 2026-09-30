@@ -3,13 +3,6 @@
 
 #include "../common/clock.h"
 
-// drr (A15-A16) - identical queue ordering to rr, but
-// each request carries a deficit counter (Request::deficit, initialised to
-// 0 - see request.h) instead of forfeiting unused allowance each round. The
-// deficit/allowance math itself lives in serve_slice (K1/slice.cpp); this
-// class only owns queue ordering, which is the same tail-requeue FIFO as
-// rr. Deficit is discarded when the request leaves the system (K1/K4
-// responsibility, not this file).
 class SchedulerDrr : public IScheduler {
 public:
     void enqueue(Request* req) override { queue_.push(req); }

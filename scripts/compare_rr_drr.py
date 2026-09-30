@@ -1,14 +1,4 @@
-#!/usr/bin/env python3
-"""C7: rr vs drr comparison (A29) - forfeited_bytes per size class, how
-often the A14 escape hatch fired (rr only, parsed from that run's server
-stderr log), and the normalised slowdown of the long-line file under each
-policy.
 
-Usage:
-    python3 compare_rr_drr.py --rr-csv results/rr_ref.csv \\
-        --drr-csv results/drr_ref.csv --rr-log results/rr_ref.server.log \\
-        --seed-count 3
-"""
 import argparse
 import re
 import sys
@@ -16,7 +6,6 @@ import sys
 from common import exclude_seed_rows, load_rows, nearest_rank_percentile, size_class
 
 A14_RE = re.compile(r"^A14 request_id=(\d+) filename=(\S+) line_bytes=(\d+) quantum=(\d+)$")
-
 
 def count_a14_fires(log_path):
     count = 0
@@ -26,7 +15,6 @@ def count_a14_fires(log_path):
                 count += 1
     return count
 
-
 def forfeited_by_class(rows):
     totals = {}
     for r in rows:
@@ -34,14 +22,12 @@ def forfeited_by_class(rows):
         totals[cls] = totals.get(cls, 0) + r["forfeited_bytes"]
     return totals
 
-
 def slowdown_for_file(rows, filename):
     return sorted(
         (r["finish_ns"] - r["arrival_ns"]) / r["bytes"]
         for r in rows
         if r["filename"] == filename and r["bytes"] > 0
     )
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -73,7 +59,6 @@ def main():
         p99 = nearest_rank_percentile(vals, 99)
         print(f"\n{label} slowdown for {args.long_line_file} (ns/byte): "
               f"median={med:.3f}  p99={p99:.3f}  (n={len(vals)})")
-
 
 if __name__ == "__main__":
     main()

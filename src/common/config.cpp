@@ -50,12 +50,10 @@ uint16_t require_port(const json& obj, const char* key, const char* path) {
     const json& v = obj.at(key);
     if (!v.is_number_integer()) fail_type(path);
     long long n = v.get<long long>();
-    if (n < 1 || n > 65535) fail_custom(path, "port must be between 1 and 65535");  // 0 = "any port": unusable here
+    if (n < 1 || n > 65535) fail_custom(path, "port must be between 1 and 65535");
     return static_cast<uint16_t>(n);
 }
 
-// An integer that must lie in [lo, hi]. A thread count of 0 or -2, for example,
-// would otherwise start a server with no workers that silently never serves.
 int require_int(const json& obj, const char* key, const char* path, long long lo, long long hi) {
     if (!obj.contains(key)) fail_missing(path);
     const json& v = obj.at(key);
@@ -70,7 +68,7 @@ int require_int(const json& obj, const char* key, const char* path, long long lo
 constexpr long long kMaxThreads = 10000;
 constexpr long long kMaxIntervalMs = 3600000;
 
-}  // namespace
+}
 
 Config load_config(const std::string& path, bool require_load_balancer) {
     std::ifstream in(path);

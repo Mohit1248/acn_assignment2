@@ -1,13 +1,4 @@
-#!/usr/bin/env python3
-"""C5: runs the 6 required experiment cells (A28) and collects CSVs/logs.
 
-Cells: fcfs/sjf/rr/drr at the reference config (4 server threads, 8 client
-threads), plus fcfs/rr again at server_threads=1.
-
-Usage:
-    python3 run_experiments.py                      # all 6 cells
-    python3 run_experiments.py --only fcfs_ref,rr_ref
-"""
 import argparse
 import json
 import os
@@ -33,19 +24,13 @@ RUNS = [
     {"name": "rr_st1", "sched": "rr", "server_threads": SINGLE_SERVER_THREADS, "quantum": QUANTUM},
 ]
 
-# Throwaway run executed once before the measured cells and never recorded: the
-# first cell of a session otherwise pays a cold-start cost (fresh process, cold
-# page cache/CPU) that has nothing to do with the policy being measured.
 WARMUP_RUN = {"name": "warmup", "sched": "fcfs", "server_threads": REFERENCE_SERVER_THREADS}
 WARMUP_REQUESTS = 300
 
-# Supplementary cells (NOT among the six required by A28). They only run when
-# named explicitly, e.g. `--only drr_st1,sjf_st1`; the report labels them as such.
 EXTRA_RUNS = [
     {"name": "drr_st1", "sched": "drr", "server_threads": SINGLE_SERVER_THREADS, "quantum": QUANTUM},
     {"name": "sjf_st1", "sched": "sjf", "server_threads": SINGLE_SERVER_THREADS},
 ]
-
 
 def make_config(server_threads, port, path):
     with open(BASE_CONFIG_PATH) as f:
@@ -55,7 +40,6 @@ def make_config(server_threads, port, path):
     cfg["server"]["port"] = port
     with open(path, "w") as f:
         json.dump(cfg, f, indent=2)
-
 
 def wait_for_health(ip, port, timeout_s):
     deadline = time.time() + timeout_s
@@ -71,7 +55,6 @@ def wait_for_health(ip, port, timeout_s):
             pass
         time.sleep(0.2)
     return False
-
 
 def run_one(run, index, args, results_dir):
     port = 9100 + index
@@ -124,7 +107,6 @@ def run_one(run, index, args, results_dir):
     print(f"[{run['name']}] done -> {csv_path}")
     return True
 
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server-bin", default=os.path.join(REPO_ROOT, "server"))
@@ -154,7 +136,7 @@ def main():
     failures = []
     for i, run in enumerate(RUNS + EXTRA_RUNS):
         if only is None and run in EXTRA_RUNS and not args.with_extras:
-            continue  # the six required cells only, unless extras are requested
+            continue
         if only and run["name"] not in only:
             continue
         if not run_one(run, i, args, args.results_dir):
@@ -164,7 +146,6 @@ def main():
         print(f"\n{len(failures)} run(s) failed: {', '.join(failures)}", file=sys.stderr)
         sys.exit(1)
     print("\nall runs completed")
-
 
 if __name__ == "__main__":
     main()

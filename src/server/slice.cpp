@@ -15,31 +15,19 @@
 #include "../common/logging.h"
 #include "../common/protocol.h"
 
-// K1 + K2: one scheduling round of one request (see scheduler.h for the
-// contract). Everything a later round needs - byte offset, the pinned file
-// descriptor, unread socket bytes, the deficit - lives in the Request (A17).
-
 namespace {
 
 constexpr uint64_t kUnbounded = std::numeric_limits<uint64_t>::max();
-// Lines longer than this are streamed in chunks instead of being copied into
-// the batch buffer, so one enormous line cannot force a huge allocation.
 constexpr uint64_t kChunk = 64 * 1024;
-// A PUT chunk (<= 64 KB) must arrive within this long in total. It stops a client that
-// trickles the body from pinning a worker (A5/A9); 10 s per 64 KB is a floor of ~6 KB/s.
 constexpr int kBodyChunkTimeoutMs = 10000;
 
 bool bounded(Policy p) { return p == Policy::RR || p == Policy::DRR; }
 
 void send_error(int fd, const char* reason) {
     std::string e = format_err(reason);
-    send_all(fd, e.data(), e.size());  // best effort - the peer may already be gone
+    send_all(fd, e.data(), e.size());
 }
 
-// ---------------------------------------------------------------- GET ----
-
-// Bytes in the line that starts at `offset`, INCLUDING its '\n'. A final line
-// with no '\n' is still a line (A6). Returns 0 if the file cannot be read.
 uint64_t line_length_at(int fd, uint64_t offset, uint64_t file_size) {
     char buf[16 * 1024];
     uint64_t pos = offset;
@@ -85,7 +73,6 @@ bool stream_range(int file_fd, int sock, uint64_t offset, uint64_t len) {
     return true;
 }
 
-// Whole lines waiting to go out in ONE write (--p, A8).
 struct Batch {
     std::string data;
     int lines = 0;
@@ -101,8 +88,6 @@ SliceResult serve_get(Request* r, int fd, const SliceParams& sp) {
     r->rounds += 1;
 
     if (!r->started) {
-        // "OK <size>\n" is protocol overhead: it is not file data and does not
-        // consume any of the round's byte allowance.
         std::string ok = format_ok(r->bytes);
         if (!send_all(fd, ok.data(), ok.size())) return SliceResult::FAILED;
         r->started = true;
@@ -110,14 +95,14 @@ SliceResult serve_get(Request* r, int fd, const SliceParams& sp) {
 
     const bool bnd = bounded(sp.policy);
     uint64_t left = kUnbounded;
-    if (bnd) {  // A12 / A15 (saturating add: a huge --quantum must not wrap around)
+    if (bnd) {
         const uint64_t carried = sp.policy == Policy::DRR ? r->deficit : 0;
         left = carried > kUnbounded - sp.quantum ? kUnbounded : carried + sp.quantum;
     }
 
     const int p = std::max(1, sp.p_lines);
     Batch batch;
-    uint64_t sent_this_round = 0;  // file bytes already sent in this round
+    uint64_t sent_this_round = 0;
 
     while (r->byte_offset < r->bytes) {
         uint64_t len = line_length_at(r->file_fd, r->byte_offset, r->bytes);
@@ -125,13 +110,6 @@ SliceResult serve_get(Request* r, int fd, const SliceParams& sp) {
 
         if (bnd) {
             if (sp.policy == Policy::RR && sent_this_round == 0 && len > sp.quantum) {
-                // A14: this line can never fit in ANY round and this round has
-                // transferred nothing yet, so send it whole and end the round,
-                // overrunning the allowance - otherwise the request would be
-                // requeued having transferred nothing, forever. (If bytes were
-                // already sent this round, the line is instead handled by A13
-                // below: the round ends and the remainder is forfeited; the line
-                // then goes out first thing in the next round via this branch.)
                 if (!batch.flush(fd)) return SliceResult::FAILED;
                 if (!stream_range(r->file_fd, fd, r->byte_offset, len)) return SliceResult::FAILED;
                 r->byte_offset += len;
@@ -139,9 +117,6 @@ SliceResult serve_get(Request* r, int fd, const SliceParams& sp) {
                 return r->byte_offset >= r->bytes ? SliceResult::DONE : SliceResult::PREEMPTED;
             }
             if (len > left) {
-                // A13 / A15: the next whole line does not fit, so the round
-                // ends here (never mid-line, A6). rr forfeits what is left of
-                // the allowance; drr keeps it as deficit for the next round.
                 if (!batch.flush(fd)) return SliceResult::FAILED;
                 if (sp.policy == Policy::RR) r->forfeited_bytes += left;
                 else r->deficit = left;
@@ -161,14 +136,10 @@ SliceResult serve_get(Request* r, int fd, const SliceParams& sp) {
         if (bnd) left -= len;
     }
 
-    // Last byte transferred. Whatever allowance is left counts for nothing and
-    // the deficit is discarded with the request (A13, A15).
     if (!batch.flush(fd)) return SliceResult::FAILED;
     r->deficit = 0;
     return SliceResult::DONE;
 }
-
-// ---------------------------------------------------------------- PUT ----
 
 bool write_all(int fd, const char* data, size_t n) {
     size_t done = 0;
@@ -185,8 +156,6 @@ SliceResult serve_put(Request* r, int fd, const SliceParams& sp) {
     r->rounds += 1;
 
     if (!r->started) {
-        // Written to a temp file and rename()d at the end, so a concurrent GET
-        // of the same name never sees a half-written file.
         r->tmp_path = r->path + ".tmp." + std::to_string(r->id);
         r->file_fd = open(r->tmp_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
         if (r->file_fd < 0) {
@@ -199,10 +168,6 @@ SliceResult serve_put(Request* r, int fd, const SliceParams& sp) {
         r->started = true;
     }
 
-    // The body is opaque (A9): a round takes exactly min(allowance, remaining)
-    // bytes - no line scanning, no rounding, no forfeiture (A13). Every PUT
-    // round is byte-exact, so under drr there is never any unused allowance
-    // and the deficit of a PUT stays 0; the allowance is simply Q.
     const uint64_t remaining = r->bytes - r->byte_offset;
     const uint64_t take = bounded(sp.policy) ? std::min(sp.quantum, remaining) : remaining;
 
@@ -228,7 +193,7 @@ SliceResult serve_put(Request* r, int fd, const SliceParams& sp) {
     r->file_fd = -1;
     if (rename(r->tmp_path.c_str(), r->path.c_str()) != 0) {
         send_error(fd, "cannot write file");
-        return SliceResult::FAILED;  // release_request() removes the temp file
+        return SliceResult::FAILED;
     }
     r->tmp_path.clear();
 
@@ -236,7 +201,7 @@ SliceResult serve_put(Request* r, int fd, const SliceParams& sp) {
     return send_all(fd, done_ok.data(), done_ok.size()) ? SliceResult::DONE : SliceResult::FAILED;
 }
 
-}  // namespace
+}
 
 Policy parse_policy(const std::string& name) {
     if (name == "sjf") return Policy::SJF;

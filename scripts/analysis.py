@@ -1,19 +1,8 @@
-#!/usr/bin/env python3
-"""C6: waiting p50/p99, throughput, and (optionally) normalised slowdown
-per size class, computed from one run's metrics CSV (A19-A22).
 
-Usage:
-    python3 analysis.py <csv_path> --seed-count 3 [--slowdown]
-
---seed-count must equal the number of files in the workload directory used
-for that run (each seeded exactly once by `load`, see common.py's
-exclude_seed_rows for why sorting by arrival_ns reliably identifies them).
-"""
 import argparse
 import sys
 
 from common import exclude_seed_rows, load_rows, nearest_rank_percentile, size_class
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -48,7 +37,7 @@ def main():
         by_class = {}
         for r in rows:
             if r["bytes"] == 0:
-                continue  # slowdown = response/bytes is undefined for a 0-byte transfer
+                continue
             sd_ns_per_byte = (r["finish_ns"] - r["arrival_ns"]) / r["bytes"]
             by_class.setdefault(size_class(r["filename"], r["bytes"]), []).append(sd_ns_per_byte)
 
@@ -60,7 +49,6 @@ def main():
             med = nearest_rank_percentile(vals, 50)
             p99v = nearest_rank_percentile(vals, 99)
             print(f"  {cls}: median={med:.3f}  p99={p99v:.3f}  (n={len(vals)})")
-
 
 if __name__ == "__main__":
     main()
