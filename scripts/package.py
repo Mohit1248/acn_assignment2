@@ -23,8 +23,6 @@ def skip(rel):
         return True
     if rel.startswith("results/"):
         return rel not in REQUIRED_CSVS
-    if rel == "scripts/package.py":
-        return True
     return False
 
 def main():
